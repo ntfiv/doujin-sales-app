@@ -5,6 +5,7 @@ import {
 decodeCsvBuffer,
 downloadTextFile,
 eventsToCsv,
+inventoryMemosToCsv,
 isManualCsv,
 isSokubaiCsv,
 manualSalesTemplateCsv,
@@ -12,12 +13,14 @@ parseEventCsv,
 parseManualCsv,
 parseSokubaiCsv,
 parseSquareCsv,
+salesToManualCsv,
 type EventRow,
 type ManualParseResult,
 } from "./csv";
 import { qtyMasked, yenMasked } from "./format";
 import { useMask } from "./mask";
 import { useDisplaySettings } from "./display";
+import { Modal } from "./Modal";
 
 function invalidateAll(queryClient: ReturnType<typeof useQueryClient>) {
   void queryClient.invalidateQueries({ queryKey: ["overview"] });
@@ -30,6 +33,13 @@ const sectionCls =
   "rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] p-4";
 const btnCls =
   "rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface-alt)] px-4 py-2 text-sm font-medium disabled:opacity-50";
+
+/** YYYY-MM-DD stamp of today (device-local), used in export file names. */
+function exportDateStamp(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
 
 /**
  * 設定ビュー: the screenshot-mode toggle. The mask itself is applied
@@ -437,8 +447,11 @@ export function CsvImportView() {
   const onExportEvents = async () => {
     setExportErr(null);
     try {
-      const res = await api.listEvents({});
-      downloadTextFile("event-dates.csv", eventsToCsv(res.events));
+      // Same full-fidelity export as the データのエクスポート
+      // section (includes the event_type / sales_unreliable backup
+      // columns), with the export date in the file name.
+      const res = await api.getExportData({});
+      downloadTextFile(`events-${exportDateStamp()}.csv`, eventsToCsv(res.events));
     } catch (e) {
       setExportErr(`書き出しに失敗しました：${String(e)}`);
     }
@@ -584,6 +597,9 @@ export function CsvImportView() {
             </li>
             <li>
               <span className="font-medium text-[var(--text)]">カテゴリ</span>（任意）：「なし」と書くと未設定として取り込みます
+            </li>
+            <li>
+              <span className="font-medium text-[var(--text)]">完売</span>（任意）：「1」と書くと、その日に完売した記録として取り込みます（データ管理の「データのエクスポート」が書き出す列です）。列自体がなければ、完売の記録は今のまま保持されます
             </li>
             <li>ヘッダーは英語（date, product, qty, amount, category）でも読み取れます</li>
           </ul>
@@ -802,5 +818,281 @@ export function CsvImportView() {
         </p>
       </section>
     </div>
+  );
+}
+
+/**
+ * データ管理タブの一番下: データのエクスポート. Downloads the data
+ * the user entered as CSV files in this app's own import formats,
+ * so an export doubles as a backup that can be re-imported as-is.
+ * Data is fetched fresh from getExportData on every click; file
+ * names carry the export date.
+ */
+export function DataExportSection() {
+  const [msg, setMsg] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState<"sales" | "events" | "inventory" | null>(null);
+
+  const run = async (kind: "sales" | "events" | "inventory") => {
+    setMsg(null);
+    setErr(null);
+    setBusy(kind);
+    try {
+      const data = await api.getExportData({});
+      const stamp = exportDateStamp();
+      if (kind === "sales") {
+        downloadTextFile(`sales-${stamp}.csv`, salesToManualCsv(data.sales));
+        setMsg(
+          `売上データ${data.sales.length}件を書き出しました（sales-${stamp}.csv）。`,
+        );
+      } else if (kind === "events") {
+        downloadTextFile(`events-${stamp}.csv`, eventsToCsv(data.events));
+        setMsg(
+          `イベント登録${data.events.length}件を書き出しました（events-${stamp}.csv）。`,
+        );
+      } else {
+        downloadTextFile(
+          `inventory-memos-${stamp}.csv`,
+          inventoryMemosToCsv(data.inventoryMemos),
+        );
+        setMsg(
+          `在庫メモ${data.inventoryMemos.length}日分を書き出しました（inventory-memos-${stamp}.csv）。`,
+        );
+      }
+    } catch (e) {
+      setErr(`書き出しに失敗しました：${String(e)}`);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <section className={sectionCls} aria-labelledby="dt-export">
+      <h2 id="dt-export" className="font-ledger text-base font-bold">
+        データのエクスポート
+      </h2>
+      <p className="mt-1 text-sm text-[var(--dim)]">
+        入力したデータをCSVでダウンロードできます。売上とイベント登録はこのアプリの取込形式に合わせているので、書き出したファイルをそのまま取り込み直して復元できます（移行・バックアップ用）。ファイル名には書き出し日が入ります。
+      </p>
+      <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-[var(--dim)]">
+        <li>
+          <span className="font-medium text-[var(--text)]">売上データ</span>
+          ：手記録CSVと同じ形式（日付・頒布物名・冊数・金額・カテゴリ）で、金額は純売上です。手入力の「完売」は完売列（1＝完売）として含め、取り込み直すと復元されます。取引件数と総売上高は手記録CSVの形式にないため含まれません。
+        </li>
+        <li>
+          <span className="font-medium text-[var(--text)]">イベント登録</span>
+          ：イベント登録CSVと同じ形式（date, event_name, venue, prefecture,
+          city,
+          note）に、手動設定したイベント種別（event_type列）と「売り上げは参考情報」フラグ（sales_unreliable列：1＝設定あり）の列を追加したものです。取り込み直すと種別・フラグも復元されます。
+        </li>
+        <li>
+          <span className="font-medium text-[var(--text)]">在庫メモ</span>
+          ：日付ごとにURL・頒布物名・送った冊数・自由メモが分かるCSVです（参照用で、取り込みには対応していません）。
+        </li>
+      </ul>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <button
+          type="button"
+          className={btnCls}
+          disabled={busy !== null}
+          onClick={() => void run("sales")}
+        >
+          {busy === "sales" ? "書き出し中…" : "売上データを書き出す"}
+        </button>
+        <button
+          type="button"
+          className={btnCls}
+          disabled={busy !== null}
+          onClick={() => void run("events")}
+        >
+          {busy === "events" ? "書き出し中…" : "イベント登録を書き出す"}
+        </button>
+        <button
+          type="button"
+          className={btnCls}
+          disabled={busy !== null}
+          onClick={() => void run("inventory")}
+        >
+          {busy === "inventory" ? "書き出し中…" : "在庫メモを書き出す"}
+        </button>
+      </div>
+      {msg && <p className="mt-2 text-sm">{msg}</p>}
+      {err && (
+        <p role="alert" className="mt-2 text-sm text-[var(--accent)]">
+          {err}
+        </p>
+      )}
+    </section>
+  );
+}
+
+/**
+ * データ管理タブの一番下（エクスポートの下）: テスト用ダミーデータ
+ * の投入と、すべての入力データのリセット. The reset is gated
+ * behind a confirmation dialog that spells out exactly what is
+ * deleted and what is kept, plus an acknowledgement checkbox —
+ * the destructive button stays disabled until the box is ticked.
+ */
+export function DataResetSection() {
+  const queryClient = useQueryClient();
+  const [dummyMsg, setDummyMsg] = useState<string | null>(null);
+  const [dummyErr, setDummyErr] = useState<string | null>(null);
+  const [resetOpen, setResetOpen] = useState(false);
+  const [resetAck, setResetAck] = useState(false);
+  const [resetMsg, setResetMsg] = useState<string | null>(null);
+  const [resetErr, setResetErr] = useState<string | null>(null);
+
+  const insertDummy = useMutation({
+    mutationFn: async () => await api.insertDummyData({}),
+    onSuccess: (res) => {
+      invalidateAll(queryClient);
+      setDummyErr(null);
+      if (res.inserted) {
+        setDummyMsg(
+          `ダミーデータを投入しました（${res.days}日分・売上${res.rows}件）。イベント一覧・ダッシュボード・過去の頒布数を比較などで表示を確認できます。`,
+        );
+      } else if (res.alreadyPresent) {
+        setDummyMsg(
+          "ダミーデータは既に投入されています（【ダミー】の売上が台帳にあります）。",
+        );
+      } else {
+        setDummyMsg(null);
+        setDummyErr(
+          "空いている日が足りないため、ダミーデータを投入できませんでした。",
+        );
+      }
+    },
+    onError: (e) => setDummyErr(`投入に失敗しました：${String(e)}`),
+  });
+
+  const resetAll = useMutation({
+    mutationFn: async () => await api.resetAllData({ confirm: true }),
+    onSuccess: (res) => {
+      // Everything may have changed: invalidate every query.
+      void queryClient.invalidateQueries();
+      setResetOpen(false);
+      setResetAck(false);
+      setResetErr(null);
+      setResetMsg(
+        `リセットしました（売上${res.sales}件・イベント登録${res.events}件・在庫メモ${res.inventoryMemos}日分を削除）。`,
+      );
+    },
+    onError: (e) => setResetErr(`リセットに失敗しました：${String(e)}`),
+  });
+
+  return (
+    <section className={sectionCls} aria-labelledby="dt-reset">
+      <h2 id="dt-reset" className="font-ledger text-base font-bold">
+        テスト用データとリセット
+      </h2>
+
+      <h3 className="mt-3 text-sm font-bold">ダミーデータの投入（表示確認用）</h3>
+      <p className="mt-1 text-sm text-[var(--dim)]">
+        テスト用のダミー売上データをボタン1つで投入します。頒布物名・イベント名にはすべて「【ダミー】」と付くので本物の記録と混ざりません。4日分・3頒布物の売上（完売の記録1件を含む）と、都道府県の異なる4件のイベント登録が入るので、ダッシュボードや「過去の頒布数を比較」の表示確認に使えます。既に売上やイベント登録のある日は使わず、空いている日に入ります。ダミーデータも下のリセットで一緒に消せます。
+      </p>
+      <button
+        type="button"
+        className={`${btnCls} mt-3`}
+        disabled={insertDummy.isPending}
+        onClick={() => {
+          setDummyMsg(null);
+          setDummyErr(null);
+          insertDummy.mutate();
+        }}
+      >
+        {insertDummy.isPending ? "投入中…" : "ダミーデータを投入する"}
+      </button>
+      {dummyMsg && <p className="mt-2 text-sm">{dummyMsg}</p>}
+      {dummyErr && (
+        <p role="alert" className="mt-2 text-sm text-[var(--accent)]">
+          {dummyErr}
+        </p>
+      )}
+
+      <h3 className="mt-5 border-t border-[var(--border)] pt-4 text-sm font-bold">
+        すべてのデータをリセット
+      </h3>
+      <p className="mt-1 text-sm text-[var(--dim)]">
+        入力・登録したデータをすべて削除して初期状態に戻します。標準イベント一覧（マスター）は入力データではないので残ります。必要なデータがある場合は、先に上の「データのエクスポート」でバックアップを取ってください。
+      </p>
+      <button
+        type="button"
+        className="mt-3 rounded-[var(--radius)] border border-[var(--accent)] bg-[var(--surface)] px-4 py-2 text-sm font-medium text-[var(--accent)]"
+        onClick={() => {
+          setResetMsg(null);
+          setResetErr(null);
+          setResetAck(false);
+          setResetOpen(true);
+        }}
+      >
+        すべてのデータをリセットする
+      </button>
+      {resetMsg && <p className="mt-2 text-sm">{resetMsg}</p>}
+
+      <Modal
+        open={resetOpen}
+        onClose={() => setResetOpen(false)}
+        label="すべてのデータをリセット"
+      >
+        <h3 className="font-ledger text-base font-bold">
+          すべてのデータをリセットしますか？
+        </h3>
+        <p className="mt-2 text-sm">
+          次のデータが<span className="font-bold">すべて削除</span>されます。この操作は元に戻せません。
+        </p>
+        <ul className="mt-2 list-disc space-y-0.5 pl-5 text-sm text-[var(--dim)]">
+          <li>売上データ（全件。ダミーデータも含みます）</li>
+          <li>登録したイベント（イベント名・会場・メモ・手動のイベント種別）</li>
+          <li>「売り上げは参考情報」の日次フラグ</li>
+          <li>頒布物の設定（発行日・廃盤・除外フラグ）</li>
+          <li>頒布物の別名（旧名）と統合履歴</li>
+          <li>在庫メモ（URL・冊数・自由メモ）</li>
+        </ul>
+        <p className="mt-2 text-sm text-[var(--dim)]">
+          残るもの：標準イベント一覧（マスター）、イベント種別の定義、表示設定などの端末側の設定。
+        </p>
+        <p className="mt-2 text-sm text-[var(--dim)]">
+          必要なデータがある場合は、閉じて先に「データのエクスポート」でバックアップを取ってください。
+        </p>
+        <label
+          htmlFor="dt-reset-ack"
+          className="mt-3 flex cursor-pointer items-center gap-2 text-sm font-medium"
+        >
+          <input
+            id="dt-reset-ack"
+            type="checkbox"
+            aria-label="削除される内容を理解しました"
+            checked={resetAck}
+            onChange={(e) => setResetAck(e.target.checked)}
+            className="h-4 w-4 shrink-0"
+            style={{ accentColor: "var(--accent)" }}
+          />
+          削除される内容を理解しました
+        </label>
+        {resetErr && (
+          <p role="alert" className="mt-2 text-sm text-[var(--accent)]">
+            {resetErr}
+          </p>
+        )}
+        <div className="mt-4 flex flex-wrap gap-2">
+          <button
+            type="button"
+            className="rounded-[var(--radius)] bg-[var(--accent)] px-4 py-2 text-sm font-bold text-white disabled:opacity-50"
+            disabled={!resetAck || resetAll.isPending}
+            onClick={() => resetAll.mutate()}
+          >
+            {resetAll.isPending ? "リセット中…" : "リセットする"}
+          </button>
+          <button
+            type="button"
+            className={btnCls}
+            disabled={resetAll.isPending}
+            onClick={() => setResetOpen(false)}
+          >
+            やめる
+          </button>
+        </div>
+      </Modal>
+    </section>
   );
 }

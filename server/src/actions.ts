@@ -31,6 +31,53 @@ const LUMP_SUM_PRODUCT = "任意の金額";
 // toggle the flag per product afterwards.
 const REF_FLAG_PRODUCTS = ["500", "100", LUMP_SUM_PRODUCT];
 
+// ---------------------------------------------------------------------------
+// Test dummy data (insertDummyData). Clearly-labelled throwaway rows
+// for checking the dashboard / compare / list displays: every product
+// and event name carries the 【ダミー】 prefix so the rows can never
+// be mistaken for real records, and the whole set is wiped by
+// resetAllData like any other user-entered data. Dates are picked
+// from a fixed candidate list, skipping any date that already has
+// sales or an event registration, so dummy rows always land on their
+// own days and never mix into a real event day.
+// ---------------------------------------------------------------------------
+
+const DUMMY_PRODUCT_PREFIX = "【ダミー】";
+
+const DUMMY_PRODUCTS: { product: string; category: string; price: number }[] = [
+  { product: "【ダミー】サンプル本A", category: "本", price: 1000 },
+  { product: "【ダミー】サンプル本B", category: "本", price: 500 },
+  { product: "【ダミー】サンプルグッズC", category: "グッズ", price: 1500 },
+];
+
+/** Copies sold per dummy day (row) x dummy product (column). */
+const DUMMY_QTY: number[][] = [
+  [12, 5, 3],
+  [8, 9, 2],
+  [15, 4, 6],
+  [6, 11, 4],
+];
+
+const DUMMY_CANDIDATE_DATES = [
+  "2026-12-05",
+  "2026-12-12",
+  "2026-12-19",
+  "2027-01-09",
+  "2027-01-16",
+  "2027-01-23",
+  "2027-01-30",
+  "2027-02-06",
+  "2027-02-13",
+  "2027-02-20",
+];
+
+const DUMMY_PLACES: { prefecture: string; city: string }[] = [
+  { prefecture: "東京都", city: "千代田区" },
+  { prefecture: "大阪府", city: "大阪市" },
+  { prefecture: "愛知県", city: "名古屋市" },
+  { prefecture: "福岡県", city: "福岡市" },
+];
+
 const eventShape = z.object({
   date: dateStr,
   eventName: z.string().max(200),
@@ -168,6 +215,14 @@ const saleRowShape = z.object({
   gross: z.number().int(),
   net: z.number().int(),
   tx: z.number().int().nonnegative(),
+});
+
+// Import rows may optionally carry the hand-recorded 完売 flag. Only
+// the 手記録CSV backup-restore path sets it (its 完売 column); Square
+// and 即売レジ imports never do, and for them the stored flag on a
+// replaced row is preserved instead (see importSales).
+const saleImportRowShape = saleRowShape.extend({
+  soldOut: z.boolean().optional(),
 });
 
 /**
@@ -2101,27 +2156,82 @@ export const Actions = {
 
   importEvents: defineAction({
     description:
-      "Bulk upserts event registrations parsed from an event CSV (date,event_name,venue,prefecture,city,note).",
-    request: z.object({ events: z.array(eventShape).max(2000) }),
+      "Bulk upserts event registrations parsed from an event CSV (date,event_name,venue,prefecture,city,note). Rows may additionally carry the two backup columns this app's own data export writes — eventType (manual event-type override key) and salesUnreliable (per-date 「売り上げは参考情報」 flag): when a row carries one of them it is restored too (the type key is validated against the stored type list, unknown keys fall back to automatic); when a row omits them, the stored type / flag for that date is left untouched.",
+    request: z.object({
+      events: z
+        .array(
+          eventShape.extend({
+            eventType: eventTypeValue.optional(),
+            salesUnreliable: z.boolean().optional(),
+          }),
+        )
+        .max(2000),
+    }),
     response: z.object({ imported: z.number() }),
     handler: async (ctx, args) => {
       const db = ctx.db<typeof schema>();
       if (args.events.length === 0) return { imported: 0 };
-      const statements: BatchItem<"sqlite">[] = args.events.map((e) =>
-        db
-          .insert(schema.events)
-          .values(e)
-          .onConflictDoUpdate({
-            target: schema.events.date,
-            set: {
-              eventName: e.eventName,
-              venue: e.venue,
-              prefecture: e.prefecture,
-              city: e.city,
-              note: e.note,
-            },
-          }),
-      );
+      // Validate the distinct manual type keys once.
+      const typeCache = new Map<string, string>();
+      for (const e of args.events) {
+        if (e.eventType !== undefined && !typeCache.has(e.eventType)) {
+          typeCache.set(e.eventType, await resolveManualType(ctx, e.eventType));
+        }
+      }
+      const statements: BatchItem<"sqlite">[] = [];
+      for (const e of args.events) {
+        const base = {
+          date: e.date,
+          eventName: e.eventName,
+          venue: e.venue,
+          prefecture: e.prefecture,
+          city: e.city,
+          note: e.note,
+        };
+        const set: {
+          eventName: string;
+          venue: string;
+          prefecture: string;
+          city: string;
+          note: string;
+          eventType?: string;
+        } = {
+          eventName: e.eventName,
+          venue: e.venue,
+          prefecture: e.prefecture,
+          city: e.city,
+          note: e.note,
+        };
+        const values: typeof base & { eventType: string } = {
+          ...base,
+          eventType: "",
+        };
+        if (e.eventType !== undefined) {
+          const resolvedType = typeCache.get(e.eventType) ?? "";
+          values.eventType = resolvedType;
+          set.eventType = resolvedType;
+        }
+        statements.push(
+          db
+            .insert(schema.events)
+            .values(values)
+            .onConflictDoUpdate({ target: schema.events.date, set }),
+        );
+        if (e.salesUnreliable !== undefined) {
+          statements.push(
+            db
+              .insert(schema.dayFlags)
+              .values({
+                date: e.date,
+                salesUnreliable: e.salesUnreliable ? 1 : 0,
+              })
+              .onConflictDoUpdate({
+                target: schema.dayFlags.date,
+                set: { salesUnreliable: e.salesUnreliable ? 1 : 0 },
+              }),
+          );
+        }
+      }
       const [first, ...rest] = statements;
       if (first) await db.batch([first, ...rest]);
       ctx.invalidateQueries();
@@ -2137,6 +2247,236 @@ export const Actions = {
       const db = ctx.db<typeof schema>();
       const rows = await db.select().from(schema.events).orderBy(asc(schema.events.date));
       return { events: rows };
+    },
+  }),
+
+  getExportData: defineAction({
+    description:
+      "Returns everything the user entered, for the データのエクスポート CSV downloads (backup / migration): all sales rows (date x product, net amount and the hand-recorded 完売 flag), all event registrations with their manual event-type override and per-date 「売り上げは参考情報」 flag, and all inventory memos with their per-product sent counts. Read-only. No personal data exists in this ledger, so none is returned.",
+    request: z.object({}),
+    response: z.object({
+      sales: z.array(
+        z.object({
+          date: z.string(),
+          product: z.string(),
+          category: z.string(),
+          qty: z.number(),
+          net: z.number(),
+          soldOut: z.boolean(),
+        }),
+      ),
+      events: z.array(
+        eventShape.extend({
+          eventType: z.string(),
+          salesUnreliable: z.boolean(),
+        }),
+      ),
+      inventoryMemos: z.array(
+        z.object({
+          date: z.string(),
+          url: z.string(),
+          memo: z.string(),
+          items: z.array(z.object({ product: z.string(), qty: z.number() })),
+        }),
+      ),
+    }),
+    handler: async (ctx) => {
+      const db = ctx.db<typeof schema>();
+      const salesRows = await db
+        .select({
+          date: schema.sales.date,
+          product: schema.sales.product,
+          category: schema.sales.category,
+          qty: schema.sales.qty,
+          net: schema.sales.net,
+          soldOut: schema.sales.soldOut,
+        })
+        .from(schema.sales)
+        .orderBy(asc(schema.sales.date), asc(schema.sales.product));
+      const eventRows = await db
+        .select()
+        .from(schema.events)
+        .orderBy(asc(schema.events.date));
+      const flagRows = await db.select().from(schema.dayFlags);
+      const flagsByDate = new Map(
+        flagRows.map((f) => [f.date, f.salesUnreliable !== 0]),
+      );
+      const memoRows = await db
+        .select()
+        .from(schema.inventoryMemos)
+        .orderBy(asc(schema.inventoryMemos.date));
+      const itemRows = await db
+        .select()
+        .from(schema.inventoryItems)
+        .orderBy(asc(schema.inventoryItems.product));
+      const itemsByDate = new Map<string, { product: string; qty: number }[]>();
+      for (const r of itemRows) {
+        if (r.qty <= 0) continue;
+        const list = itemsByDate.get(r.date) ?? [];
+        list.push({ product: r.product, qty: r.qty });
+        itemsByDate.set(r.date, list);
+      }
+      return {
+        sales: salesRows.map((r) => ({ ...r, soldOut: r.soldOut !== 0 })),
+        events: eventRows.map((e) => ({
+          date: e.date,
+          eventName: e.eventName,
+          venue: e.venue,
+          prefecture: e.prefecture,
+          city: e.city,
+          note: e.note,
+          eventType: e.eventType,
+          salesUnreliable: flagsByDate.get(e.date) ?? false,
+        })),
+        inventoryMemos: memoRows.map((m) => ({
+          date: m.date,
+          url: m.url,
+          memo: m.memo,
+          items: itemsByDate.get(m.date) ?? [],
+        })),
+      };
+    },
+  }),
+
+  resetAllData: defineAction({
+    description:
+      "Deletes ALL user-entered data and returns the ledger to its initial state: sales, event registrations, per-date flags, product release info (release dates / 廃盤 / product-level reference flags), product aliases, product merge history, and inventory memos (headers + items). The standard event master list (master_events, reference-only candidates) and the event-type definitions are NOT user-entered records and are kept. Requires confirm: true — the client gates this behind a two-step confirmation dialog.",
+    request: z.object({ confirm: z.literal(true) }),
+    response: z.object({
+      sales: z.number(),
+      events: z.number(),
+      inventoryMemos: z.number(),
+    }),
+    handler: async (ctx) => {
+      const db = ctx.db<typeof schema>();
+      const salesCount = await db
+        .select({ n: sql<number>`count(*)` })
+        .from(schema.sales);
+      const eventsCount = await db
+        .select({ n: sql<number>`count(*)` })
+        .from(schema.events);
+      const memosCount = await db
+        .select({ n: sql<number>`count(*)` })
+        .from(schema.inventoryMemos);
+      const counts = {
+        sales: salesCount[0]?.n ?? 0,
+        events: eventsCount[0]?.n ?? 0,
+        inventoryMemos: memosCount[0]?.n ?? 0,
+      };
+      await db.batch([
+        db.delete(schema.sales),
+        db.delete(schema.events),
+        db.delete(schema.dayFlags),
+        db.delete(schema.productReleases),
+        db.delete(schema.productAliases),
+        db.delete(schema.productMerges),
+        db.delete(schema.inventoryItems),
+        db.delete(schema.inventoryMemos),
+      ]);
+      ctx.invalidateQueries();
+      return counts;
+    },
+  }),
+
+  insertDummyData: defineAction({
+    description:
+      "Inserts the test dummy dataset: 4 days of sales for 3 clearly-labelled 【ダミー】 products (varied quantities and amounts, one 完売 row) with matching 【ダミー】 event registrations in 4 different prefectures, plus release info for the dummy products. Dates come from a fixed candidate list, skipping any date that already has sales or an event registration, so dummy rows land on their own days. Does nothing (inserted: false, alreadyPresent: true) when dummy sales are already in the ledger. All dummy rows are ordinary user data — resetAllData wipes them.",
+    request: z.object({}),
+    response: z.object({
+      inserted: z.boolean(),
+      alreadyPresent: z.boolean(),
+      days: z.number(),
+      rows: z.number(),
+    }),
+    handler: async (ctx) => {
+      const db = ctx.db<typeof schema>();
+      const existingDummy = await db
+        .select({ product: schema.sales.product })
+        .from(schema.sales)
+        .where(sql`${schema.sales.product} like ${DUMMY_PRODUCT_PREFIX + "%"}`);
+      if (existingDummy.length > 0) {
+        return { inserted: false, alreadyPresent: true, days: 0, rows: 0 };
+      }
+      const salesDates = await db
+        .select({ date: schema.sales.date })
+        .from(schema.sales);
+      const eventDates = await db
+        .select({ date: schema.events.date })
+        .from(schema.events);
+      const occupied = new Set([
+        ...salesDates.map((r) => r.date),
+        ...eventDates.map((r) => r.date),
+      ]);
+      const days = DUMMY_CANDIDATE_DATES.filter((d) => !occupied.has(d)).slice(
+        0,
+        DUMMY_QTY.length,
+      );
+      if (days.length < 3) {
+        // Too few free candidate days left to make a useful dataset.
+        return { inserted: false, alreadyPresent: false, days: 0, rows: 0 };
+      }
+      const statements: BatchItem<"sqlite">[] = [];
+      let rowCount = 0;
+      days.forEach((date, i) => {
+        const place = DUMMY_PLACES[i % DUMMY_PLACES.length] ?? DUMMY_PLACES[0];
+        statements.push(
+          db.insert(schema.events).values({
+            date,
+            eventName: `【ダミー】テストイベント${i + 1}`,
+            venue: "ダミー会場",
+            prefecture: place?.prefecture ?? "",
+            city: place?.city ?? "",
+            note: "表示確認用のダミーデータです",
+            eventType: "",
+          }),
+        );
+        DUMMY_PRODUCTS.forEach((p, j) => {
+          const qty = DUMMY_QTY[i]?.[j] ?? 0;
+          if (qty <= 0) return;
+          const amount = qty * p.price;
+          rowCount++;
+          statements.push(
+            db.insert(schema.sales).values({
+              date,
+              product: p.product,
+              category: p.category,
+              qty,
+              gross: amount,
+              net: amount,
+              tx: qty,
+              // One sold-out row (first day, first product) so the
+              // 完売 display can be checked too.
+              soldOut: i === 0 && j === 0 ? 1 : 0,
+            }),
+          );
+        });
+      });
+      const firstDate = days[0];
+      if (firstDate) {
+        for (const p of DUMMY_PRODUCTS) {
+          statements.push(
+            db
+              .insert(schema.productReleases)
+              .values({
+                product: p.product,
+                releaseDate: firstDate,
+                releaseBasis: "ダミーデータ（表示確認用）",
+                discontinued: 0,
+                salesUnreliable: 0,
+              })
+              .onConflictDoNothing(),
+          );
+        }
+      }
+      const [first, ...rest] = statements;
+      if (first) await db.batch([first, ...rest]);
+      ctx.invalidateQueries();
+      return {
+        inserted: true,
+        alreadyPresent: false,
+        days: days.length,
+        rows: rowCount,
+      };
     },
   }),
 
@@ -2220,8 +2560,8 @@ export const Actions = {
 
   importSales: defineAction({
     description:
-      "Merges Square sales aggregates (date x product, parsed and privacy-stripped in the browser) into the ledger, replacing rows for the same date+product. The hand-recorded 完売 (soldOut) flag on a replaced row is preserved — imports carry no sold-out information. A category of 「なし」 (Square's placeholder for no category) is stored as an empty category.",
-    request: z.object({ rows: z.array(saleRowShape).max(5000) }),
+      "Merges sales aggregates (date x product, parsed and privacy-stripped in the browser) into the ledger, replacing rows for the same date+product. The hand-recorded 完売 (soldOut) flag on a replaced row is preserved when the import rows carry no sold-out information (Square / 即売レジ imports); rows that do carry it — only a 手記録CSV written by this app's data export, via its 完売 column — restore the flag. A category of 「なし」 (Square's placeholder for no category) is stored as an empty category.",
+    request: z.object({ rows: z.array(saleImportRowShape).max(5000) }),
     response: z.object({ imported: z.number(), dates: z.number() }),
     handler: async (ctx, args) => {
       const db = ctx.db<typeof schema>();
@@ -2232,7 +2572,7 @@ export const Actions = {
       // the caller-side aggregation key, so resolve first, then merge
       // any (date, product) duplicates created by the mapping.
       const aliasMap = await loadAliasMap(ctx);
-      const resolved = new Map<string, z.infer<typeof saleRowShape>>();
+      const resolved = new Map<string, z.infer<typeof saleImportRowShape>>();
       for (const r of args.rows) {
         const mapped = {
           ...r,
@@ -2247,26 +2587,64 @@ export const Actions = {
           cur.net += mapped.net;
           cur.tx += mapped.tx;
           if (!cur.category && mapped.category) cur.category = mapped.category;
+          // A merged duplicate counts as sold out when any of its
+          // source rows says so; rows without the information leave
+          // the merged value alone.
+          if (cur.soldOut === undefined) cur.soldOut = mapped.soldOut;
+          else if (mapped.soldOut) cur.soldOut = true;
         } else {
           resolved.set(key, mapped);
         }
       }
       const rows = [...resolved.values()];
-      const statements: BatchItem<"sqlite">[] = rows.map((r) =>
-        db
+      const statements: BatchItem<"sqlite">[] = rows.map((r) => {
+        const set: {
+          category: string;
+          qty: number;
+          gross: number;
+          net: number;
+          tx: number;
+          soldOut?: number;
+        } = {
+          category: r.category,
+          qty: r.qty,
+          gross: r.gross,
+          net: r.net,
+          tx: r.tx,
+        };
+        const values: {
+          date: string;
+          product: string;
+          category: string;
+          qty: number;
+          gross: number;
+          net: number;
+          tx: number;
+          soldOut?: number;
+        } = {
+          date: r.date,
+          product: r.product,
+          category: r.category,
+          qty: r.qty,
+          gross: r.gross,
+          net: r.net,
+          tx: r.tx,
+        };
+        // Only rows that carry sold-out information (a restored
+        // 手記録CSV backup) write the flag; every other import
+        // leaves the stored value untouched on replace.
+        if (r.soldOut !== undefined) {
+          values.soldOut = r.soldOut ? 1 : 0;
+          set.soldOut = r.soldOut ? 1 : 0;
+        }
+        return db
           .insert(schema.sales)
-          .values(r)
+          .values(values)
           .onConflictDoUpdate({
             target: [schema.sales.date, schema.sales.product],
-            set: {
-              category: r.category,
-              qty: r.qty,
-              gross: r.gross,
-              net: r.net,
-              tx: r.tx,
-            },
-          }),
-      );
+            set,
+          });
+      });
       const [first, ...rest] = statements;
       if (first) await db.batch([first, ...rest]);
       ctx.invalidateQueries();

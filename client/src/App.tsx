@@ -7,7 +7,7 @@ import { DayRow, NewEventSection } from "./Ledger";
 import { CompareTable } from "./Compare";
 import { ProductsView } from "./Products";
 import { ChartsView } from "./Charts";
-import { CsvImportSettingsSection, CsvImportView, DisplaySettingsSection, ScreenshotModeSection } from "./DataTools";
+import { CsvImportSettingsSection, CsvImportView, DataExportSection, DataResetSection, DisplaySettingsSection, ScreenshotModeSection } from "./DataTools";
 import { ProductAdminSections } from "./ProductAdmin";
 import { UnregisteredView } from "./Unregistered";
 import { EventTypeManageSection, EventTypeSection } from "./EventAdmin";
@@ -554,6 +554,15 @@ export function App() {
                     </div>
                     </>
                   )}
+                  {/* データのエクスポート and テスト用データとリセット
+                      sit at the very bottom of the データ管理 tab,
+                      below both sub-tabs. */}
+                  <div className="mt-6">
+                    <DataExportSection />
+                  </div>
+                  <div className="mt-6">
+                    <DataResetSection />
+                  </div>
                 </section>
               )}
             </div>
