@@ -1,0 +1,104 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1794747893178,
+      "tag": "0001_initial",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1794747893178,
+      "tag": "0002_sales_and_events_tables",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1794752985206,
+      "tag": "0003_add_day_flags_table",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1794755654382,
+      "tag": "0004_add_product_releases_table",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1794755654382,
+      "tag": "0005_add_product_aliases_and_merges_tables",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1794755654382,
+      "tag": "0006_add_product_series_tables",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1794759242093,
+      "tag": "0007_add_product_sales_unreliable_flag",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1794789064123,
+      "tag": "0008_add_sales_sold_out_flag",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1794795293033,
+      "tag": "0009_add_event_type_to_events",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1794801541821,
+      "tag": "0010_add_event_types_table",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1794821254352,
+      "tag": "0011_remove_series_tables_and_retired_flag_confidence_columns",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1794831435129,
+      "tag": "0012_add_master_events_table",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1794834083909,
+      "tag": "0013_expand_standard_event_types_to_master_systems",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "6",
+      "when": 1794841548291,
+      "tag": "0014_add_inventory_memos_tables",
+      "breakpoints": true
+    }
+  ]
+}

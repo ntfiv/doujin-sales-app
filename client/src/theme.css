@@ -1,0 +1,294 @@
+/* @import url('https://fonts.googleapis.com/css2?family=Shippori+Mincho:wght@500;700&display=swap'); */
+@import "tailwindcss";
+@import "tailwindcss-safe-area";
+
+@theme {
+  --text-xs: 12px;
+  --text-xs--line-height: 16px;
+  --text-sm: 14px;
+  --text-sm--line-height: 20px;
+  --text-base: 16px;
+  --text-base--line-height: 24px;
+  --text-lg: 18px;
+  --text-lg--line-height: 28px;
+  --text-xl: 20px;
+  --text-xl--line-height: 28px;
+  --text-2xl: 24px;
+  --text-2xl--line-height: 32px;
+  --text-3xl: 30px;
+  --text-3xl--line-height: 36px;
+  --text-4xl: 36px;
+  --text-4xl--line-height: 40px;
+  --text-5xl: 48px;
+  --text-5xl--line-height: 52px;
+}
+
+:root {
+  color-scheme: light dark;
+  --bg: #faf6ef;
+  --surface: #fffdf8;
+  --surface-alt: #f1ebdf;
+  --text: #23202b;
+  --dim: #7d7462;
+  --border: #ddd3bf;
+  --accent: #c2402a;
+  --accent-soft: #f6e3dc;
+  /* 「同県で初頒布」バッジ: 控えめな薄い青系 (pale blue bg, moderate blue text) */
+  --first-bg: #dfeaf4;
+  --first-text: #3d6b99;
+  /* イベント一覧の日内訳に出る「廃盤」バッジ: 目立つ黒寄りグレー
+     (near-black gray bg, white text). 頒布物一覧側の薄いバッジとは別。 */
+  --disc-bg: #33302b;
+  --disc-text: #ffffff;
+  /* 選択中（開いている行）の強調: 左バーは #c99a86、背景は
+     これから開催のイベント行と同じ薄さ（--upcoming-bg と同値）に
+     統一（2026-11-17 オーナー指示）。元の赤系（淡赤背景＋濃赤の左
+     バー = --accent-soft / --accent）へ戻す場合は、--selected-bg を
+     #f6e3dc に、バーを #c2402a に差し替える。 */
+  --selected-bg: #f8f3ea;
+  --selected-bar: #c99a86;
+  /* これから開催（今日以降）のイベント行の背景: --selected-bg と
+     同じ薄さに統一済み。 */
+  --upcoming-bg: #f8f3ea;
+  --ai: #33526b;
+  --chart-3: #a8741a;
+  --chart-4: #4f7d46;
+  --chart-5: #2e7d78;
+  --chart-6: #8a7a5f;
+  --radius: 10px;
+  --space-surface: var(--surface);
+  --space-surface-alt: var(--surface-alt);
+  --space-muted: var(--dim);
+  --space-border: var(--border);
+  --space-accent: var(--accent);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #17151d;
+    --surface: #221f2b;
+    --surface-alt: #2b2735;
+    --text: #efe9dc;
+    --dim: #a29885;
+    --border: #3d3749;
+    --accent: #e0684e;
+    --accent-soft: #452a24;
+    --first-bg: #26394c;
+    --first-text: #a8c8e8;
+    /* Dark mode: a near-black badge would vanish on the dark surface,
+       so invert to a light gray bg with dark text — still prominent. */
+    --disc-bg: #d9d2c2;
+    --disc-text: #23202b;
+    /* 選択中（開いている行）の強調（ダーク）: 左バーは #9a6a58、背景は
+       これから開催のイベント行と同じ薄さ（--upcoming-bg と同値）に
+       統一（2026-11-17）。元の赤系（--accent-soft / --accent と同値）
+       へ戻すときは #452a24 / #e0684e に差し替える。 */
+    --selected-bg: #27232e;
+    --selected-bar: #9a6a58;
+    /* これから開催のイベント行の背景（ダーク）: --selected-bg と同じ。 */
+    --upcoming-bg: #27232e;
+    --ai: #8fb4cc;
+    --chart-3: #d29a3f;
+    --chart-4: #7fae74;
+    --chart-5: #5fb3ac;
+    --chart-6: #b3a488;
+  }
+}
+
+.font-ledger {
+  font-family: "Hiragino Mincho ProN", "Hiragino Mincho Pro", "YuMincho",
+    "Yu Mincho", "MS PMincho", serif;
+}
+
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Page-level horizontal containment: the page itself must never
+   scroll or pan sideways. The only sideways-scrollable element in
+   the app is the compare table's own scroller (Compare.tsx); on
+   touch browsers a horizontal swipe that starts OUTSIDE the table
+   could otherwise drag the whole page sideways — the root scroller
+   picks up the gesture / the table's overflow and the entire view,
+   tab bar included, shifts (reported 2026-11-16, compare mode
+   only). `clip` is used rather than `hidden` because clip does not
+   create a scroll container, so the sticky tab bar keeps sticking
+   to the viewport. overscroll-behavior-x additionally stops a
+   horizontal overscroll at any edge from chaining into a page pan.
+   Inner scrollers keep their own horizontal scrolling — only the
+   page is locked. */
+html,
+body,
+[data-hatch-space-root] {
+  overflow-x: clip;
+  overscroll-behavior-x: none;
+}
+
+/* The element that ACTUALLY scrolls this app is neither html nor
+   body: the SDK shell renders the page inside
+   [data-generated-space-root], a `position: fixed; overflow: auto`
+   box (see @hatch/space-sdk styles.css). The first version of the
+   lock above never targeted it, so on a real iPhone the fixed
+   scroller stayed horizontally scrollable — in compare mode the
+   wide table gave it somewhere to pan to, and the whole view
+   shifted sideways (the user's "なおってない" report, 2026-11-16).
+   Lock that scroller itself:
+   - overflow-x hidden/clip: no horizontal scrolling of the page,
+     whatever the content does. `hidden` is declared first as the
+     fallback for engines without `clip`; with overflow-y: auto
+     (from the SDK) `clip` computes to `hidden` anyway, and this
+     element already IS the scroll container, so unlike on
+     html/body neither value can break the sticky tab bar.
+   - overscroll-behavior-x: none: a chained horizontal overscroll
+     from the compare table's scroller cannot move the page.
+   - touch-action: pan-y: horizontal touch drags on the page are
+     not treated as pans at all. Gestures that start on the compare
+     table are handled by the table's own scroller first (its
+     touch-action stays the default), so the table still scrolls
+     sideways; only page-level horizontal panning is disabled.
+   The `html` prefix raises specificity above the SDK's own
+   `[data-generated-space-root]` rule regardless of load order. */
+html [data-generated-space-root] {
+  overflow-x: hidden;
+  overflow-x: clip;
+  overscroll-behavior-x: none;
+  touch-action: pan-y;
+}
+
+/* Hanko-style stamp for unregistered / status marks */
+.stamp {
+  display: inline-block;
+  border: 1.5px solid var(--accent);
+  color: var(--accent);
+  border-radius: 4px;
+  padding: 0 6px;
+  font-size: 11px;
+  line-height: 18px;
+  letter-spacing: 0.08em;
+  transform: rotate(-2deg);
+  white-space: nowrap;
+}
+
+/* Screenshot mode (mask.tsx): blur a chart body so its shape stays
+   visible but axis values, bars and tooltips cannot be read in a
+   screenshot. Applied to chart containers only while the mode is on. */
+.chart-blur {
+  filter: blur(7px);
+}
+
+/* Highlight for the currently open / expanded row in browsing lists
+   (open day, open city, open product, …) so the selection is visible
+   at a glance: tinted background plus an accent bar on the left edge.
+   Not used on checkbox management lists (廃盤の管理・統合など):
+   there the checkbox itself and badges already show the
+   state, and a full-row tint with the left bar overlaps the checkbox.
+   Unlayered on purpose so it wins over bg utilities. */
+.row-selected {
+  background-color: var(--selected-bg);
+  box-shadow: inset 4px 0 0 0 var(--selected-bar);
+}
+
+/* Phone tap targets: at least 32px tall. */
+@layer base {
+  button, [role="button"], select, summary, input:not([type="checkbox"], [type="radio"]) {
+    min-height: 2rem;
+  }
+}
+
+/* ------------------------------------------------------------------
+   Modern-web-guidance patterns (rebuild, 2026-11-16)
+   ------------------------------------------------------------------ */
+
+/* Keyboard focus is always visible and unmistakable (guide:
+   accessibility / focus management). Unlayered so it wins over the
+   Tailwind utilities that set borders and shadows. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Validate-after-interaction (guide: forms / :user-invalid): a field
+   is only painted as invalid after the user has interacted with it,
+   or when the app marks it aria-invalid after a submit attempt. */
+input:user-invalid,
+select:user-invalid,
+textarea:user-invalid,
+input[aria-invalid="true"],
+select[aria-invalid="true"],
+textarea[aria-invalid="true"] {
+  border-color: var(--accent);
+}
+
+/* Long lists: an earlier build deferred off-screen row rendering with
+   `content-visibility: auto` on the row elements themselves, but rows
+   that carry their own border-b lost that border on alternating rows
+   in practice (the skipped-content paint dropped the 1px rule lines),
+   so the pattern was removed — do not re-apply content-visibility to
+   an element that draws a border. */
+
+/* Native <dialog> modals (guide: dialog). The dialog element itself
+   is the frame; inner content keeps the app's card look. */
+dialog.modal-panel {
+  margin: auto;
+  width: min(92vw, 34rem);
+  max-height: 88dvh;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  padding: 1rem;
+}
+dialog.modal-panel::backdrop {
+  background: rgb(0 0 0 / 0.45);
+}
+
+/* Same-document view transitions (guide: same-document transitions):
+   a short cross-fade for tab switches and detail open/close. Entirely
+   disabled for reduced-motion users — the JS helper also skips
+   starting a transition in that case. */
+@media (prefers-reduced-motion: no-preference) {
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation-duration: 0.18s;
+  }
+  dialog.modal-panel[open] {
+    animation: modal-in 0.16s ease-out;
+  }
+  dialog.modal-panel[open]::backdrop {
+    animation: modal-fade-in 0.16s ease-out;
+  }
+}
+
+@keyframes modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.99);
+  }
+}
+@keyframes modal-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/* 過去の頒布数を比較表 (Compare.tsx): the title column is fixed at 25% of
+   the table width (set in markup) and the event columns split the
+   remaining 75% equally, on every viewport. The desktop layout is
+   the baseline with min-width 34rem. On phone widths the minimum
+   width instead grows with the number of compared event columns
+   (--compare-cols, set inline by the component): a fixed title
+   allowance plus ~4.9rem per event column, so date headers and
+   counts are never crushed no matter how many events are checked.
+   The percentage widths resolve against that wider table width,
+   so the 25% / equal-split proportions hold while the table
+   scrolls sideways inside its overflow-x container with the
+   product column stuck to the left edge. */
+.compare-table {
+  min-width: 34rem;
+}
+@media (max-width: 639px) {
+  .compare-table {
+    min-width: calc(6.75rem + var(--compare-cols, 5) * 4.9rem);
+  }
+}

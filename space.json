@@ -1,0 +1,8 @@
+{
+  "entry": "client/dist/index.html",
+  "managedCronJobs": [],
+  "name": "同人誌売上管理",
+  "platformVersion": 28,
+  "runtime": "typescript",
+  "slug": "tong-ren-zhi-mai-shang-guan-li"
+}

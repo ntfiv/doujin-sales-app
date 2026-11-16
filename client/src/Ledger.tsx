@@ -1,0 +1,1822 @@
+import { useMemo, useState, type FormEvent } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { api, type ApiResponse } from "./api";
+import { Modal } from "./Modal";
+import { dateLabel, qtyFmt, qtyMasked, releaseAgeLabel, yenMasked } from "./format";
+import { useMasked } from "./mask";
+import { useDisplaySettings } from "./display";
+import {
+classifyEvent,
+fallbackTypeKey,
+isEventTypeId,
+resolveEventType,
+typeLabel,
+useEventTypes,
+} from "./eventType";
+import {
+byReleaseDateDesc,
+DiscontinuedBadge,
+FirstAppearanceBadge,
+ProductRefBadge,
+SoldOutBadge,
+} from "./Products";
+import { matchesQuery } from "./search";
+import { MasterCandidatePicker } from "./MasterCandidates";
+
+export type DaySummary = ApiResponse<typeof api, "getOverview">["days"][number];
+type DayDetail = ApiResponse<typeof api, "getDayDetail">;
+
+/**
+ * Fields of a registered event that are still blank (event name, venue,
+ * prefecture, city). Returns [] for unregistered days and complete ones.
+ */
+export function missingEventFields(day: DaySummary): string[] {
+  if (day.eventName === null) return [];
+  const missing: string[] = [];
+  if (!day.eventName.trim()) missing.push("イベント名");
+  if (!day.venue?.trim()) missing.push("開催施設");
+  if (!day.prefecture?.trim()) missing.push("都道府県");
+  if (!day.city?.trim()) missing.push("市区町村");
+  return missing;
+}
+
+const inputCls =
+  "w-full rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-base text-[var(--text)]";
+const labelCls = "block text-xs font-medium text-[var(--dim)] mb-1";
+
+/** All 47 prefectures, in the standard north-to-south order. */
+export const PREFECTURES = [
+  "北海道",
+  "青森県",
+  "岩手県",
+  "宮城県",
+  "秋田県",
+  "山形県",
+  "福島県",
+  "茨城県",
+  "栃木県",
+  "群馬県",
+  "埼玉県",
+  "千葉県",
+  "東京都",
+  "神奈川県",
+  "新潟県",
+  "富山県",
+  "石川県",
+  "福井県",
+  "山梨県",
+  "長野県",
+  "岐阜県",
+  "静岡県",
+  "愛知県",
+  "三重県",
+  "滋賀県",
+  "京都府",
+  "大阪府",
+  "兵庫県",
+  "奈良県",
+  "和歌山県",
+  "鳥取県",
+  "島根県",
+  "岡山県",
+  "広島県",
+  "山口県",
+  "徳島県",
+  "香川県",
+  "愛媛県",
+  "高知県",
+  "福岡県",
+  "佐賀県",
+  "長崎県",
+  "熊本県",
+  "大分県",
+  "宮崎県",
+  "鹿児島県",
+  "沖縄県",
+];
+
+export function EventForm({
+  date,
+  initial,
+  initialFlags,
+  onDone,
+  requireEventName = false,
+  onSaved,
+}: {
+  date: string;
+  initial: DayDetail["event"];
+  initialFlags: DayDetail["flags"];
+  onDone: () => void;
+  /** New-registration mode: an event name is required to save. */
+  requireEventName?: boolean;
+  /** Called after a successful save (not on cancel). */
+  onSaved?: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const types = useEventTypes();
+  const [eventName, setEventName] = useState(initial?.eventName ?? "");
+  const [venue, setVenue] = useState(initial?.venue ?? "");
+  const [prefecture, setPrefecture] = useState(initial?.prefecture ?? "");
+  const [city, setCity] = useState(initial?.city ?? "");
+  const [note, setNote] = useState(initial?.note ?? "");
+  // Manual event-type override: "" = 自動判定 (classified from the
+  // event name), otherwise the key of one of the stored event types.
+  // A stored manual value wins over the automatic classification
+  // everywhere.
+  const [eventType, setEventType] = useState(initial?.eventType ?? "");
+  const autoTypeLabel = typeLabel(types, classifyEvent(eventName || null, types));
+  const [salesUnreliable, setSalesUnreliable] = useState(initialFlags.salesUnreliable);
+  // There is no day-level 「新刊あり」 flag: 「新刊」 is judged
+  // automatically per product from its release date (see Products.tsx).
+  const [error, setError] = useState<string | null>(null);
+  // Validate-after-interaction: the event-name field is only marked
+  // invalid (aria-invalid + :user-invalid styling) once a save has
+  // been attempted with it empty — never on first render.
+  const [nameInvalid, setNameInvalid] = useState(false);
+
+  const invalidate = () => {
+    void queryClient.invalidateQueries({ queryKey: ["overview"] });
+    void queryClient.invalidateQueries({ queryKey: ["day", date] });
+    void queryClient.invalidateQueries({ queryKey: ["cities"] });
+    void queryClient.invalidateQueries({ queryKey: ["products"] });
+    void queryClient.invalidateQueries({ queryKey: ["typeBreakdownDays"] });
+  };
+
+  const save = useMutation({
+    mutationFn: async () => {
+      // When nothing about the event itself is entered and none is
+      // registered yet, save only the flags so the day stays 未登録.
+      const hasEventInput =
+        initial !== null ||
+        Boolean(
+          eventName.trim() ||
+            venue.trim() ||
+            prefecture ||
+            city.trim() ||
+            note.trim() ||
+            eventType,
+        );
+      return hasEventInput
+        ? await api.saveEvent({
+            date,
+            eventName,
+            venue,
+            prefecture,
+            city,
+            note,
+            eventType: isEventTypeId(eventType, types) ? eventType : "",
+            salesUnreliable,
+          })
+        : await api.saveDayFlags({
+            date,
+            salesUnreliable,
+          });
+    },
+    onSuccess: () => {
+      invalidate();
+      onSaved?.();
+      onDone();
+    },
+    onError: (e) => setError(String(e)),
+  });
+
+  const remove = useMutation({
+    mutationFn: async () => await api.deleteEvent({ date }),
+    onSuccess: () => {
+      invalidate();
+      onDone();
+    },
+    onError: (e) => setError(String(e)),
+  });
+
+  const submit = (ev: FormEvent) => {
+    ev.preventDefault();
+    setError(null);
+    if (requireEventName && !eventName.trim()) {
+      setNameInvalid(true);
+      setError("イベント名を入力してください。新規登録にはイベント名が必要です。");
+      return;
+    }
+    setNameInvalid(false);
+    save.mutate();
+  };
+
+  return (
+    <form onSubmit={submit} noValidate>
+      <p className="font-ledger text-sm font-bold">{dateLabel(date)}のイベント</p>
+      {/* 標準イベント一覧の候補: shown whenever the master list has
+          entries for this date — also on days that already have a
+          user registration, where they are reference only (picking
+          one fills the fields; it never saves or overwrites by
+          itself). The candidate's 出典 note is not copied into メモ. */}
+      <div className="mt-3 empty:hidden">
+        <MasterCandidatePicker
+          date={date}
+          onPick={(c) => {
+            setEventName(c.eventName);
+            setVenue(c.venue);
+            setPrefecture(c.prefecture);
+            setCity(c.city);
+            if (c.eventName.trim()) setNameInvalid(false);
+          }}
+        />
+      </div>
+      <div className="mt-3 grid grid-cols-[minmax(0,1fr)] gap-3">
+        <div>
+          <label htmlFor={`ev-name-${date}`} className={labelCls}>
+            イベント名{requireEventName ? "（必須）" : ""}
+          </label>
+          <input
+            id={`ev-name-${date}`}
+            className={inputCls}
+            value={eventName}
+            required={requireEventName}
+            aria-invalid={nameInvalid || undefined}
+            aria-describedby={nameInvalid ? `ev-error-${date}` : undefined}
+            onChange={(e) => {
+              setEventName(e.target.value);
+              if (e.target.value.trim()) setNameInvalid(false);
+            }}
+            placeholder="例：コミックマーケット103"
+          />
+        </div>
+        <div>
+          <label htmlFor={`ev-venue-${date}`} className={labelCls}>
+            開催施設
+          </label>
+          <input
+            id={`ev-venue-${date}`}
+            className={inputCls}
+            value={venue}
+            onChange={(e) => setVenue(e.target.value)}
+            placeholder="例：東京ビッグサイト"
+          />
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label htmlFor={`ev-pref-${date}`} className={labelCls}>
+              都道府県
+            </label>
+            <div className="relative">
+              <select
+                id={`ev-pref-${date}`}
+                className={`${inputCls} appearance-none pr-9`}
+                value={prefecture}
+                onChange={(e) => setPrefecture(e.target.value)}
+              >
+                <option value="">選択してください</option>
+                {prefecture && !PREFECTURES.includes(prefecture) && (
+                  <option value={prefecture}>{prefecture}（登録済み）</option>
+                )}
+                {PREFECTURES.map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
+                ))}
+              </select>
+              <span
+                aria-hidden
+                className="pointer-events-none absolute top-1/2 right-3 -translate-y-1/2 text-xs text-[var(--dim)]"
+              >
+                ▼
+              </span>
+            </div>
+          </div>
+          <div>
+            <label htmlFor={`ev-city-${date}`} className={labelCls}>
+              市区町村
+            </label>
+            <input
+              id={`ev-city-${date}`}
+              className={inputCls}
+              value={city}
+              onChange={(e) => setCity(e.target.value)}
+              placeholder="例：江東区"
+            />
+          </div>
+        </div>
+        <div>
+          <label htmlFor={`ev-note-${date}`} className={labelCls}>
+            メモ
+          </label>
+          <input
+            id={`ev-note-${date}`}
+            className={inputCls}
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            placeholder="例：2日目のみ参加"
+          />
+        </div>
+        <div>
+          <label htmlFor={`ev-type-${date}`} className={labelCls}>
+            イベント種別
+          </label>
+          <div className="relative">
+            <select
+              id={`ev-type-${date}`}
+              className={`${inputCls} appearance-none pr-9`}
+              value={eventType}
+              onChange={(e) => setEventType(e.target.value)}
+            >
+              <option value="">自動判定（{autoTypeLabel}）</option>
+              {types.map((t) => (
+                <option key={t.key} value={t.key}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
+            <span
+              aria-hidden
+              className="pointer-events-none absolute top-1/2 right-3 -translate-y-1/2 text-xs text-[var(--dim)]"
+            >
+              ▼
+            </span>
+          </div>
+          <p className="mt-1 text-xs text-[var(--dim)]">
+            {eventType
+              ? "手動設定が優先されます。「自動判定」に戻すと推定に戻ります。"
+              : "イベント名から自動判定しています。違う場合は手動で選べます。"}
+          </p>
+        </div>
+        <fieldset className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-3 py-2">
+          <legend className="px-1 text-xs font-medium text-[var(--dim)]">フラグ</legend>
+          <label
+            htmlFor={`ev-flag-ref-${date}`}
+            className="flex cursor-pointer items-start gap-2 py-1.5 text-sm"
+          >
+            <input
+              id={`ev-flag-ref-${date}`}
+              type="checkbox"
+              aria-label="売り上げは参考情報"
+              checked={salesUnreliable}
+              onChange={(e) => setSalesUnreliable(e.target.checked)}
+              className="mt-0.5 h-4 w-4 shrink-0"
+              style={{ accentColor: "var(--accent)" }}
+            />
+            <span>
+              売り上げは参考情報
+              <span className="block text-xs text-[var(--dim)]">
+                このイベントでの売上データが完全ではない場合にチェック。（売り上げがない、もしくは『任意の金額』のみで頒布物別内訳がない日）
+              </span>
+            </span>
+          </label>
+        </fieldset>
+      </div>
+      {error && (
+        <p role="alert" id={`ev-error-${date}`} className="mt-2 text-sm text-[var(--accent)]">
+          保存できませんでした：{error}
+        </p>
+      )}
+      <div className="mt-3 flex flex-wrap gap-2">
+        <button
+          type="submit"
+          disabled={save.isPending}
+          className="rounded-[var(--radius)] bg-[var(--accent)] px-4 py-2 text-sm font-bold text-white disabled:opacity-50"
+        >
+          {save.isPending ? "保存中…" : "保存する"}
+        </button>
+        <button
+          type="button"
+          onClick={onDone}
+          className="rounded-[var(--radius)] border border-[var(--border)] px-4 py-2 text-sm"
+        >
+          キャンセル
+        </button>
+        {initial && (
+          <button
+            type="button"
+            disabled={remove.isPending}
+            onClick={() => remove.mutate()}
+            className="ml-auto px-2 py-2 text-sm text-[var(--accent)] underline disabled:opacity-50"
+          >
+            登録を削除
+          </button>
+        )}
+      </div>
+    </form>
+  );
+}
+
+type DaySalesRow = DayDetail["rows"][number];
+
+/**
+ * In-app sales editor for one day: add a row by picking an
+ * already-registered product and entering 冊数・金額， edit an existing
+ * row's numbers, or delete a row. Each row also carries a 完売
+ * checkbox — that day the copies of that product brought to the event
+ * sold out (stock ran short). New product creation is not offered
+ * here — products appear once they have sales (e.g. via a Square CSV
+ * import). Manual rows are ordinary sales rows: every total and chart
+ * picks them up immediately. Note that re-importing a Square CSV later
+ * replaces the row for any date × product present in that CSV (the
+ * same replace rule as always); rows for products absent from the CSV
+ * are left untouched. The 完売 flag is not part of the CSV, so it
+ * survives a re-import.
+ */
+function SalesEditor({
+  date,
+  rows,
+  onClose,
+}: {
+  date: string;
+  rows: DaySalesRow[];
+  onClose: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const productsQuery = useQuery({
+    queryKey: ["products"],
+    queryFn: () => api.getProducts({}),
+  });
+  const [error, setError] = useState<string | null>(null);
+  // Validate-after-interaction: fields are marked aria-invalid only
+  // after a save attempt fails on them (never on first render).
+  const [editInvalid, setEditInvalid] = useState<{ qty: boolean; net: boolean }>({
+    qty: false,
+    net: false,
+  });
+  const [addInvalid, setAddInvalid] = useState<{
+    product: boolean;
+    qty: boolean;
+    net: boolean;
+  }>({ product: false, qty: false, net: false });
+  // Row being edited inline (product name), plus its draft numbers.
+  const [editProduct, setEditProduct] = useState<string | null>(null);
+  const [editQty, setEditQty] = useState("");
+  const [editNet, setEditNet] = useState("");
+  const [editSoldOut, setEditSoldOut] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  // Add form.
+  const [addProduct, setAddProduct] = useState("");
+  const [addQty, setAddQty] = useState("");
+  const [addNet, setAddNet] = useState("");
+  const [addSoldOut, setAddSoldOut] = useState(false);
+
+  const invalidate = () => {
+    void queryClient.invalidateQueries({ queryKey: ["overview"] });
+    void queryClient.invalidateQueries({ queryKey: ["day", date] });
+    void queryClient.invalidateQueries({ queryKey: ["cities"] });
+    void queryClient.invalidateQueries({ queryKey: ["products"] });
+    void queryClient.invalidateQueries({ queryKey: ["typeBreakdownDays"] });
+  };
+
+  const save = useMutation({
+    mutationFn: async (v: { product: string; qty: number; net: number; soldOut: boolean }) =>
+      await api.saveSalesRow({
+        date,
+        product: v.product,
+        qty: v.qty,
+        net: v.net,
+        soldOut: v.soldOut,
+      }),
+    onSuccess: (_data, v) => {
+      invalidate();
+      if (editProduct === v.product) setEditProduct(null);
+      setEditInvalid({ qty: false, net: false });
+      if (addProduct === v.product) {
+        setAddQty("");
+        setAddNet("");
+        setAddSoldOut(false);
+        setAddInvalid({ product: false, qty: false, net: false });
+      }
+    },
+    onError: (e) => setError(String(e)),
+  });
+
+  const remove = useMutation({
+    mutationFn: async (product: string) => await api.deleteSalesRow({ date, product }),
+    onSuccess: () => {
+      invalidate();
+      setConfirmDelete(null);
+    },
+    onError: (e) => setError(String(e)),
+  });
+
+  const parseNumbers = (
+    qtyStr: string,
+    netStr: string,
+    mark: (v: { qty: boolean; net: boolean }) => void,
+  ) => {
+    const qty = Number(qtyStr);
+    const net = Number(netStr);
+    if (qtyStr.trim() === "" || !Number.isFinite(qty) || qty === 0) {
+      mark({ qty: true, net: false });
+      setError("冊数を入力してください（0以外の数字）。");
+      return null;
+    }
+    if (netStr.trim() === "" || !Number.isFinite(net) || !Number.isInteger(net)) {
+      mark({ qty: false, net: true });
+      setError("金額（売上・円）を整数で入力してください。");
+      return null;
+    }
+    mark({ qty: false, net: false });
+    return { qty, net };
+  };
+
+  const submitEdit = (product: string) => {
+    setError(null);
+    const nums = parseNumbers(editQty, editNet, setEditInvalid);
+    if (nums) save.mutate({ product, ...nums, soldOut: editSoldOut });
+  };
+
+  const submitAdd = () => {
+    setError(null);
+    if (!addProduct) {
+      setAddInvalid({ product: true, qty: false, net: false });
+      setError("追加する頒布物を選んでください。");
+      return;
+    }
+    const nums = parseNumbers(addQty, addNet, (v) =>
+      setAddInvalid({ product: false, ...v }),
+    );
+    if (nums) save.mutate({ product: addProduct, ...nums, soldOut: addSoldOut });
+  };
+
+  const inDay = new Set(rows.map((r) => r.product));
+  const addable = (productsQuery.data?.products ?? []).filter((p) => !inDay.has(p.product));
+  const numInputCls =
+    "w-full rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-2 py-1.5 text-base text-[var(--text)]";
+
+  return (
+    <div>
+      <div className="flex items-center justify-between gap-2">
+        <p className="font-ledger text-sm font-bold">{dateLabel(date)}の売上を編集</p>
+        <button
+          type="button"
+          onClick={onClose}
+          className="shrink-0 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-xs whitespace-nowrap"
+        >
+          閉じる
+        </button>
+      </div>
+
+      {rows.length > 0 && (
+        <ul className="mt-3 grid grid-cols-[minmax(0,1fr)] gap-2">
+          {rows.map((r) => (
+            <li
+              key={r.product}
+              className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-3 py-2"
+            >
+              <p className="text-sm font-medium">{r.product}</p>
+              {editProduct === r.product ? (
+                <div className="mt-2">
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label htmlFor={`se-qty-${r.product}`} className={labelCls}>
+                        冊数
+                      </label>
+                      <input
+                        id={`se-qty-${r.product}`}
+                        type="number"
+                        inputMode="numeric"
+                        required
+                        className={numInputCls}
+                        value={editQty}
+                        aria-invalid={editInvalid.qty || undefined}
+                        aria-describedby={editInvalid.qty ? `se-error-${date}` : undefined}
+                        onChange={(e) => setEditQty(e.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor={`se-net-${r.product}`} className={labelCls}>
+                        金額（売上・円）
+                      </label>
+                      <input
+                        id={`se-net-${r.product}`}
+                        type="number"
+                        inputMode="numeric"
+                        required
+                        className={numInputCls}
+                        value={editNet}
+                        aria-invalid={editInvalid.net || undefined}
+                        aria-describedby={editInvalid.net ? `se-error-${date}` : undefined}
+                        onChange={(e) => setEditNet(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                  <label
+                    htmlFor={`se-soldout-${r.product}`}
+                    className="mt-2 flex cursor-pointer items-start gap-2 text-sm"
+                  >
+                    <input
+                      id={`se-soldout-${r.product}`}
+                      type="checkbox"
+                      aria-label={`${r.product}は完売`}
+                      checked={editSoldOut}
+                      onChange={(e) => setEditSoldOut(e.target.checked)}
+                      className="mt-0.5 h-4 w-4 shrink-0"
+                      style={{ accentColor: "var(--accent)" }}
+                    />
+                    <span>
+                      完売
+                      <span className="block text-xs text-[var(--dim)]">
+                        その日、持って行った分が足りずに売り切れた
+                      </span>
+                    </span>
+                  </label>
+                  <div className="mt-2 flex gap-2">
+                    <button
+                      type="button"
+                      disabled={save.isPending}
+                      onClick={() => submitEdit(r.product)}
+                      className="rounded-[var(--radius)] bg-[var(--accent)] px-3 py-1.5 text-sm font-bold text-white disabled:opacity-50"
+                    >
+                      {save.isPending ? "保存中…" : "保存"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEditProduct(null)}
+                      className="rounded-[var(--radius)] border border-[var(--border)] px-3 py-1.5 text-sm"
+                    >
+                      キャンセル
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <span className="tnum text-sm text-[var(--dim)]">
+                    {qtyFmt(r.qty)}冊 ・ ¥{r.net.toLocaleString("ja-JP")}
+                  </span>
+                  {r.soldOut && <SoldOutBadge />}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setError(null);
+                      setConfirmDelete(null);
+                      setEditInvalid({ qty: false, net: false });
+                      setEditProduct(r.product);
+                      setEditQty(String(r.qty));
+                      setEditNet(String(r.net));
+                      setEditSoldOut(r.soldOut);
+                    }}
+                    className="px-1 py-1 text-sm font-medium underline"
+                  >
+                    編集
+                  </button>
+                  {confirmDelete === r.product ? (
+                    <>
+                      <span className="text-sm text-[var(--accent)]">この行を削除しますか？</span>
+                      <button
+                        type="button"
+                        disabled={remove.isPending}
+                        onClick={() => remove.mutate(r.product)}
+                        className="rounded-[var(--radius)] bg-[var(--accent)] px-3 py-1 text-sm font-bold text-white disabled:opacity-50"
+                      >
+                        {remove.isPending ? "削除中…" : "削除する"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setConfirmDelete(null)}
+                        className="px-1 py-1 text-sm underline"
+                      >
+                        やめる
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setError(null);
+                        setEditProduct(null);
+                        setConfirmDelete(r.product);
+                      }}
+                      className="px-1 py-1 text-sm text-[var(--accent)] underline"
+                    >
+                      削除
+                    </button>
+                  )}
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div className="mt-3 border-t border-dashed border-[var(--border)] pt-3">
+        <p className="text-sm font-bold">売上を追加</p>
+        {productsQuery.isPending ? (
+          <p className="mt-2 text-sm text-[var(--dim)]">頒布物の一覧を読み込み中…</p>
+        ) : productsQuery.error ? (
+          <p role="alert" className="mt-2 text-sm text-[var(--accent)]">
+            頒布物の一覧を読み込めませんでした：{String(productsQuery.error)}
+          </p>
+        ) : addable.length === 0 ? (
+          <p className="mt-2 text-sm text-[var(--dim)]">
+            追加できる頒布物がありません（すべてこの日に登録済みです）。新しい頒布物は各種CSV取込で増えます。
+          </p>
+        ) : (
+          <div className="mt-2 grid grid-cols-[minmax(0,1fr)] gap-2">
+            <div>
+              <label htmlFor={`se-add-product-${date}`} className={labelCls}>
+                頒布物（登録済みから選択）
+              </label>
+              <div className="relative">
+                <select
+                  id={`se-add-product-${date}`}
+                  className={`${inputCls} appearance-none pr-9`}
+                  value={addProduct}
+                  required
+                  aria-invalid={addInvalid.product || undefined}
+                  aria-describedby={addInvalid.product ? `se-error-${date}` : undefined}
+                  onChange={(e) => setAddProduct(e.target.value)}
+                >
+                  <option value="">選択してください</option>
+                  {addable.map((p) => (
+                    <option key={p.product} value={p.product}>
+                      {p.product}
+                    </option>
+                  ))}
+                </select>
+                <span
+                  aria-hidden
+                  className="pointer-events-none absolute top-1/2 right-3 -translate-y-1/2 text-xs text-[var(--dim)]"
+                >
+                  ▼
+                </span>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label htmlFor={`se-add-qty-${date}`} className={labelCls}>
+                  冊数
+                </label>
+                <input
+                  id={`se-add-qty-${date}`}
+                  type="number"
+                  inputMode="numeric"
+                  required
+                  className={inputCls}
+                  value={addQty}
+                  aria-invalid={addInvalid.qty || undefined}
+                  aria-describedby={addInvalid.qty ? `se-error-${date}` : undefined}
+                  onChange={(e) => setAddQty(e.target.value)}
+                  placeholder="例：12"
+                />
+              </div>
+              <div>
+                <label htmlFor={`se-add-net-${date}`} className={labelCls}>
+                  金額（売上・円）
+                </label>
+                <input
+                  id={`se-add-net-${date}`}
+                  type="number"
+                  inputMode="numeric"
+                  required
+                  className={inputCls}
+                  value={addNet}
+                  aria-invalid={addInvalid.net || undefined}
+                  aria-describedby={addInvalid.net ? `se-error-${date}` : undefined}
+                  onChange={(e) => setAddNet(e.target.value)}
+                  placeholder="例：6000"
+                />
+              </div>
+            </div>
+            <label
+              htmlFor={`se-add-soldout-${date}`}
+              className="flex cursor-pointer items-start gap-2 text-sm"
+            >
+              <input
+                id={`se-add-soldout-${date}`}
+                type="checkbox"
+                aria-label="完売"
+                checked={addSoldOut}
+                onChange={(e) => setAddSoldOut(e.target.checked)}
+                className="mt-0.5 h-4 w-4 shrink-0"
+                style={{ accentColor: "var(--accent)" }}
+              />
+              <span>
+                完売
+                <span className="block text-xs text-[var(--dim)]">
+                  その日、持って行った分が足りずに売り切れた
+                </span>
+              </span>
+            </label>
+            <div>
+              <button
+                type="button"
+                disabled={save.isPending}
+                onClick={submitAdd}
+                className="rounded-[var(--radius)] bg-[var(--accent)] px-4 py-2 text-sm font-bold text-white disabled:opacity-50"
+              >
+                {save.isPending ? "追加中…" : "この売上を追加"}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {error && (
+        <p role="alert" id={`se-error-${date}`} className="mt-2 text-sm text-[var(--accent)]">
+          {error}
+        </p>
+      )}
+      <p className="mt-3 text-xs text-[var(--dim)]">
+        ここで入力した売上は、その日の合計・総計・グラフにすぐ反映されます。金額は純売上として記録されます（総売上も同額）。各種CSVを再取込すると、その日×その頒布物の行はCSVの集計で置き換わります（手入力の行も対象）。CSVにない頒布物の行は残ります。「完売」はCSVにない情報なので、再取込しても消えません。
+      </p>
+    </div>
+  );
+}
+
+type InventoryMemoData = NonNullable<DayDetail["inventoryMemo"]>;
+
+/**
+ * 在庫メモ chip for a day row: the day has a saved inventory memo.
+ * When counts are recorded, the total rides along （合計N冊）.
+ */
+export function InventoryMemoBadge({ totalQty }: { totalQty: number }) {
+  const masked = useMasked();
+  return (
+    <span className="inline-block rounded-full bg-[var(--surface-alt)] px-2 py-0.5 text-[11px] font-medium whitespace-nowrap text-[var(--dim)]">
+      在庫メモ{totalQty > 0 ? `（合計${qtyMasked(totalQty, masked)}冊）` : ""}
+    </span>
+  );
+}
+
+/**
+ * 在庫メモ editor for one day: one URL (official site etc.), the
+ * per-product counts of copies sent / to bring, and a free memo.
+ * The product picker is the registered product list minus 廃盤 and
+ * 除外 products — those never appear here (per the user's rule).
+ * Counts left blank or 0 are not saved. A product whose count was
+ * saved earlier but has since become 廃盤/除外 is hidden from the
+ * picker, yet its saved count is carried through an edit unchanged
+ * (and still shown in the read-only view) rather than silently
+ * dropped. Clearing every field and saving deletes the memo.
+ */
+function InventoryMemoEditor({
+  date,
+  eventName,
+  initial,
+  onClose,
+}: {
+  date: string;
+  eventName: string;
+  initial: DayDetail["inventoryMemo"];
+  onClose: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const productsQuery = useQuery({
+    queryKey: ["products"],
+    queryFn: () => api.getProducts({}),
+  });
+  const [url, setUrl] = useState(initial?.url ?? "");
+  const [memo, setMemo] = useState(initial?.memo ?? "");
+  const [quantities, setQuantities] = useState<Record<string, string>>(() => {
+    const init: Record<string, string> = {};
+    for (const item of initial?.items ?? []) init[item.product] = String(item.qty);
+    return init;
+  });
+  const [search, setSearch] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [urlInvalid, setUrlInvalid] = useState(false);
+  const [qtyInvalid, setQtyInvalid] = useState(false);
+
+  const invalidate = () => {
+    void queryClient.invalidateQueries({ queryKey: ["overview"] });
+    void queryClient.invalidateQueries({ queryKey: ["day", date] });
+    void queryClient.invalidateQueries({ queryKey: ["cities"] });
+  };
+
+  const save = useMutation({
+    mutationFn: async (v: {
+      url: string;
+      memo: string;
+      items: { product: string; qty: number }[];
+    }) => await api.saveInventoryMemo({ date, ...v }),
+    onSuccess: () => {
+      invalidate();
+      onClose();
+    },
+    onError: (e) => setError(String(e)),
+  });
+
+  const allProducts = productsQuery.data?.products ?? [];
+  // Picker list: registered products except 廃盤 and 除外， newest
+  // release first (the app-wide product ordering).
+  const eligible = useMemo(
+    () =>
+      [...allProducts]
+        .filter((p) => !p.discontinued && !p.salesUnreliable)
+        .sort(byReleaseDateDesc),
+    [allProducts],
+  );
+  const eligibleNames = useMemo(
+    () => new Set(eligible.map((p) => p.product)),
+    [eligible],
+  );
+  // Saved counts whose product is no longer pickable (廃盤/除外に
+  // なった、または一覧に無い）: hidden here, preserved on save.
+  const hiddenItems = (initial?.items ?? []).filter(
+    (item) => !eligibleNames.has(item.product),
+  );
+  const visible = eligible.filter((p) => matchesQuery(search, p.product));
+
+  const enteredItems = Object.entries(quantities)
+    .map(([product, v]) => ({ product, qty: Number(v) }))
+    .filter((i) => Number.isInteger(i.qty) && i.qty > 0);
+  const enteredTotal = enteredItems.reduce((s, i) => s + i.qty, 0);
+
+  const submit = () => {
+    setError(null);
+    const trimmedUrl = url.trim();
+    if (trimmedUrl !== "") {
+      let ok = false;
+      try {
+        const u = new URL(trimmedUrl);
+        ok = u.protocol === "http:" || u.protocol === "https:";
+      } catch {
+        ok = false;
+      }
+      if (!ok) {
+        setUrlInvalid(true);
+        setError("URLは http:// または https:// で始まる形で入力してください。");
+        return;
+      }
+    }
+    setUrlInvalid(false);
+    // Every count field must be blank or a non-negative integer.
+    for (const v of Object.values(quantities)) {
+      if (v.trim() === "") continue;
+      const n = Number(v);
+      if (!Number.isInteger(n) || n < 0 || n > 100000) {
+        setQtyInvalid(true);
+        setError("冊数は0以上の整数で入力してください。");
+        return;
+      }
+    }
+    setQtyInvalid(false);
+    save.mutate({ url: trimmedUrl, memo, items: enteredItems });
+  };
+
+  // Fixed width on purpose: this class is used only for the
+  // per-product count inputs below. It must NOT carry w-full —
+  // combined with the row's flex layout, a full-width shrink-0
+  // input squeezed the product-name label to zero width (names
+  // invisible, stray horizontal scrollbar), the display bug
+  // reported 2026-11-17.
+  const numInputCls =
+    "w-24 shrink-0 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-2 py-1.5 text-base text-[var(--text)]";
+
+  return (
+    <div>
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="font-ledger text-sm font-bold">{dateLabel(date)}の在庫メモ</p>
+          {eventName && (
+            <p className="mt-0.5 text-sm break-words">{eventName}</p>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="shrink-0 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-xs whitespace-nowrap"
+        >
+          閉じる
+        </button>
+      </div>
+
+      <div className="mt-3 grid grid-cols-[minmax(0,1fr)] gap-3">
+        <div>
+          <label htmlFor={`inv-url-${date}`} className={labelCls}>
+            URL（公式サイトなど）
+          </label>
+          <input
+            id={`inv-url-${date}`}
+            type="url"
+            inputMode="url"
+            className={inputCls}
+            value={url}
+            aria-invalid={urlInvalid || undefined}
+            aria-describedby={error ? `inv-error-${date}` : undefined}
+            onChange={(e) => setUrl(e.target.value)}
+            placeholder="https://…"
+          />
+          <p className="mt-1 text-xs text-[var(--dim)]">
+            保存するとリンクとして表示され、タップで開けます。
+          </p>
+        </div>
+
+        <div>
+          <p className={labelCls}>頒布物ごとの冊数（送った／持っていく冊数）</p>
+          {productsQuery.isPending ? (
+            <p className="text-sm text-[var(--dim)]">頒布物の一覧を読み込み中…</p>
+          ) : productsQuery.error ? (
+            <p role="alert" className="text-sm text-[var(--accent)]">
+              頒布物の一覧を読み込めませんでした：{String(productsQuery.error)}
+            </p>
+          ) : eligible.length === 0 ? (
+            <p className="text-sm text-[var(--dim)]">
+              記録できる頒布物がありません（廃盤・除外の頒布物は表示されません）。
+            </p>
+          ) : (
+            <>
+              <input
+                type="search"
+                aria-label="頒布物名で絞り込み"
+                placeholder="頒布物名で絞り込み"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className={inputCls}
+              />
+              {/* The single column is minmax(0, 1fr) on purpose: a
+                  plain auto column sizes to the widest row's
+                  max-content — the longest product name, which is
+                  nowrap for truncation — so on phone widths the
+                  rows grew past the dialog and pushed the count
+                  inputs off-screen (reported 2026-11-17, after the
+                  input-width fix alone proved not enough). The
+                  outer form grid carries the same template for the
+                  same reason. */}
+              <ul className="mt-2 grid max-h-72 grid-cols-[minmax(0,1fr)] gap-1.5 overflow-y-auto pr-1">
+                {visible.map((p) => (
+                  <li
+                    key={p.product}
+                    className="flex min-w-0 items-center gap-2 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5"
+                  >
+                    <label
+                      htmlFor={`inv-qty-${date}-${p.product}`}
+                      className="min-w-0 flex-1 truncate text-sm"
+                    >
+                      {p.product}
+                    </label>
+                    <input
+                      id={`inv-qty-${date}-${p.product}`}
+                      type="number"
+                      inputMode="numeric"
+                      min={0}
+                      className={numInputCls}
+                      value={quantities[p.product] ?? ""}
+                      aria-invalid={qtyInvalid || undefined}
+                      aria-describedby={error ? `inv-error-${date}` : undefined}
+                      onChange={(e) =>
+                        setQuantities((prev) => ({
+                          ...prev,
+                          [p.product]: e.target.value,
+                        }))
+                      }
+                      placeholder="冊数"
+                    />
+                    <span className="shrink-0 text-sm text-[var(--dim)]">冊</span>
+                  </li>
+                ))}
+                {visible.length === 0 && (
+                  <li className="px-1 py-2 text-sm text-[var(--dim)]">
+                    絞り込みに合う頒布物がありません。
+                  </li>
+                )}
+              </ul>
+              <p className="tnum mt-1 text-xs text-[var(--dim)]">
+                入力済み：{enteredItems.length}頒布物・合計{enteredTotal.toLocaleString("ja-JP")}冊（空欄・0の頒布物は保存されません）
+              </p>
+              {hiddenItems.length > 0 && (
+                <p className="mt-1 text-xs text-[var(--dim)]">
+                  ※ {hiddenItems.map((i) => i.product).join("、")} は廃盤・除外のため一覧に出ませんが、保存済みの冊数（
+                  {hiddenItems.map((i) => `${i.product} ${i.qty}冊`).join("、")}
+                  ）はそのまま残ります。
+                </p>
+              )}
+            </>
+          )}
+        </div>
+
+        <div>
+          <label htmlFor={`inv-memo-${date}`} className={labelCls}>
+            メモ（自由入力）
+          </label>
+          <textarea
+            id={`inv-memo-${date}`}
+            className={`${inputCls} min-h-24`}
+            value={memo}
+            onChange={(e) => setMemo(e.target.value)}
+            placeholder="例：宅配便で前日に送付、残りは当日手持ち"
+          />
+        </div>
+      </div>
+
+      {error && (
+        <p role="alert" id={`inv-error-${date}`} className="mt-2 text-sm text-[var(--accent)]">
+          {error}
+        </p>
+      )}
+      <div className="mt-3 flex flex-wrap gap-2">
+        <button
+          type="button"
+          disabled={save.isPending}
+          onClick={submit}
+          className="rounded-[var(--radius)] bg-[var(--accent)] px-4 py-2 text-sm font-bold text-white disabled:opacity-50"
+        >
+          {save.isPending ? "保存中…" : "保存する"}
+        </button>
+        <button
+          type="button"
+          onClick={onClose}
+          className="rounded-[var(--radius)] border border-[var(--border)] px-4 py-2 text-sm"
+        >
+          キャンセル
+        </button>
+      </div>
+      <p className="mt-3 text-xs text-[var(--dim)]">
+        URL・メモ・冊数をすべて空にして保存すると、在庫メモ自体が削除されます。
+      </p>
+    </div>
+  );
+}
+
+/**
+ * Read-only 在庫メモ section inside the day detail: the saved URL as
+ * a tappable link, the per-product counts with their total, and the
+ * free memo — plus the edit entry point. Shown for every day,
+ * including future event dates with no sales yet.
+ *
+ * Collapsible: tapping the heading toggles the body. The initial
+ * state follows whether the day has sales entered — days WITH sales
+ * start collapsed (the memo is mostly for upcoming events), days
+ * WITHOUT sales (future events etc.) start open. The heading always
+ * shows whether a memo exists and its total count, so a collapsed
+ * section still tells the user what is saved.
+ */
+function InventoryMemoSection({
+  date,
+  eventName,
+  memo,
+  hasSales,
+}: {
+  date: string;
+  eventName: string;
+  memo: DayDetail["inventoryMemo"];
+  hasSales: boolean;
+}) {
+  const masked = useMasked();
+  const [editing, setEditing] = useState(false);
+  const [open, setOpen] = useState(() => !hasSales);
+  // Only http/https URLs ever reach storage (enforced on save), but
+  // render as a link only when the stored value still parses as one.
+  const linkUrl = (() => {
+    if (!memo?.url) return null;
+    try {
+      const u = new URL(memo.url);
+      return u.protocol === "http:" || u.protocol === "https:" ? memo.url : null;
+    } catch {
+      return null;
+    }
+  })();
+
+  return (
+    <section
+      aria-label="在庫メモ"
+      className="mt-4 border-t border-dashed border-[var(--border)] pt-3"
+    >
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="font-ledger text-sm font-bold">
+          <button
+            type="button"
+            aria-expanded={open}
+            aria-controls={`inventory-memo-body-${date}`}
+            onClick={() => setOpen((v) => !v)}
+            className="flex items-center gap-1.5 text-left"
+          >
+            <span aria-hidden className="text-xs text-[var(--dim)]">
+              {open ? "▼" : "▶"}
+            </span>
+            在庫メモ
+            <span className="text-xs font-normal text-[var(--dim)]">
+              {memo
+                ? memo.items.length > 0
+                  ? `（${memo.items.length}頒布物・合計${qtyMasked(memo.totalQty, masked)}冊）`
+                  : "（登録あり）"
+                : "（未登録）"}
+            </span>
+          </button>
+        </h3>
+        <button
+          type="button"
+          onClick={() => setEditing(true)}
+          className="rounded-[var(--radius)] border border-[var(--border)] px-3 py-1.5 text-xs font-medium"
+        >
+          {memo ? "在庫メモを編集" : "在庫メモを追加"}
+        </button>
+      </div>
+      {open && (
+        <div id={`inventory-memo-body-${date}`}>
+          {memo ? (
+        <div className="mt-2 grid grid-cols-[minmax(0,1fr)] gap-2 text-sm">
+          {linkUrl && (
+            <p>
+              <span className="text-xs text-[var(--dim)]">URL：</span>
+              <a
+                href={linkUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="break-all text-[var(--ai)] underline"
+              >
+                {linkUrl}
+              </a>
+            </p>
+          )}
+          {memo.items.length > 0 && (
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-[var(--border)] text-left text-xs text-[var(--dim)]">
+                  <th scope="col" className="py-1 pr-2 font-medium">頒布物</th>
+                  <th scope="col" className="py-1 text-right font-medium">送った冊数</th>
+                </tr>
+              </thead>
+              <tbody>
+                {memo.items.map((i) => (
+                  <tr key={i.product} className="border-b border-[var(--border)]/50">
+                    <td className="py-1.5 pr-2">{i.product}</td>
+                    <td className="tnum py-1.5 text-right align-top">
+                      {qtyMasked(i.qty, masked)}冊
+                    </td>
+                  </tr>
+                ))}
+                <tr className="font-bold">
+                  <td className="py-1.5 pr-2">合計</td>
+                  <td className="tnum py-1.5 text-right">
+                    {qtyMasked(memo.totalQty, masked)}冊
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          )}
+          {memo.memo && <p className="whitespace-pre-wrap">{memo.memo}</p>}
+        </div>
+      ) : null}
+        </div>
+      )}
+      <Modal
+        open={editing}
+        onClose={() => setEditing(false)}
+        label={
+          eventName
+            ? `${dateLabel(date)} ${eventName} の在庫メモ`
+            : `${dateLabel(date)}の在庫メモ`
+        }
+      >
+        <InventoryMemoEditor
+          date={date}
+          eventName={eventName}
+          initial={memo}
+          onClose={() => setEditing(false)}
+        />
+      </Modal>
+    </section>
+  );
+}
+
+function DayDetailView({ date }: { date: string }) {
+  const masked = useMasked();
+  const { hideDiscontinued } = useDisplaySettings();
+  const detail = useQuery({
+    queryKey: ["day", date],
+    queryFn: () => api.getDayDetail({ date }),
+  });
+  const queryClient = useQueryClient();
+  const [editing, setEditing] = useState(false);
+  const [salesEditing, setSalesEditing] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  const removeDay = useMutation({
+    mutationFn: async () => await api.deleteSalesDay({ date }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["overview"] });
+      void queryClient.invalidateQueries({ queryKey: ["cities"] });
+      void queryClient.invalidateQueries({ queryKey: ["products"] });
+      void queryClient.invalidateQueries({ queryKey: ["typeBreakdownDays"] });
+      void queryClient.invalidateQueries({ queryKey: ["day", date] });
+    },
+    onError: (e) => setDeleteError(String(e)),
+  });
+
+  if (detail.isPending) return <p className="py-3 text-sm text-[var(--dim)]">読み込み中…</p>;
+  if (detail.error)
+    return (
+      <p role="alert" className="py-3 text-sm text-[var(--accent)]">
+        読み込めませんでした：{String(detail.error)}
+      </p>
+    );
+  const data = detail.data;
+  // 表示設定「『廃盤』の頒布物を表示しない」: 廃盤の行だけを画面から
+  // 外す。合計は従来どおり廃盤分も含めて全行から計算する（表示だけ
+  // の非表示で、データ・集計は変えない）。
+  const visibleRows = hideDiscontinued
+    ? data.rows.filter((r) => !r.discontinued)
+    : data.rows;
+  const hiddenDiscontinuedCount = data.rows.length - visibleRows.length;
+  const totalQty = data.rows.reduce((s, r) => s + r.qty, 0);
+  const totalNet = data.rows.reduce((s, r) => s + r.net, 0);
+
+  return (
+    <div className="border-t border-dashed border-[var(--border)] px-4 py-3">
+      {data.event ? (
+        data.event.note ? (
+          <p className="text-sm">{data.event.note}</p>
+        ) : null
+      ) : (
+        <p className="text-sm text-[var(--dim)]">
+          この日のイベントは未登録です。登録すると都市別・イベント別に集計できます。
+        </p>
+      )}
+      {data.flags.salesUnreliable && (
+        <p className="mt-2 text-sm">
+          <FlagBadge />
+          <span className="ml-2 text-[var(--dim)]">
+            売り上げは参考情報です（元のデータがきちんと入力できていない可能性があります）
+          </span>
+        </p>
+      )}
+
+      {data.rows.length === 0 ? (
+        <p className="mt-3 text-sm text-[var(--dim)]">
+          この日の売上記録はまだありません。下の「売上を追加」から追加できます（各種CSV取込でも表示されます）。
+        </p>
+      ) : (
+      <table className="mt-3 w-full text-sm">
+        <thead>
+          <tr className="border-b border-[var(--border)] text-left text-xs text-[var(--dim)]">
+            <th scope="col" className="py-1 pr-2 font-medium">頒布物</th>
+            <th scope="col" className="py-1 pr-2 text-right font-medium">冊数</th>
+            <th scope="col" className="py-1 text-right font-medium">売上</th>
+          </tr>
+        </thead>
+        <tbody>
+          {visibleRows.map((r) => (
+            <tr key={r.product} className="border-b border-[var(--border)]/50">
+              <td className="py-1.5 pr-2">
+                {r.product === "任意の金額" ? (
+                  <>
+                    任意の金額
+                    <span className="ml-2 text-xs text-[var(--dim)]">
+                      （頒布物不明・本の集計には含めません）
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    {r.product}
+                    {r.category && (
+                      <span className="ml-2 text-xs text-[var(--dim)]">{r.category}</span>
+                    )}
+                  </>
+                )}
+                {(r.isFirstAppearance ||
+                  (r.appearanceNo !== null && r.appearanceNo >= 2) ||
+                  r.daysSinceRelease !== null ||
+                  r.productSalesUnreliable ||
+                  r.discontinued ||
+                  r.soldOut) && (
+                  <span className="mt-0.5 flex flex-wrap items-center gap-1.5">
+                    {r.isFirstAppearance && <FirstAppearanceBadge />}
+                    {r.appearanceNo !== null && r.appearanceNo >= 2 && (
+                      <span className="text-xs text-[var(--dim)]">{r.appearanceNo}回目</span>
+                    )}
+                    {r.daysSinceRelease !== null && (
+                      <span className="text-xs text-[var(--dim)]">
+                        {releaseAgeLabel(r.daysSinceRelease)}
+                      </span>
+                    )}
+                    {r.productSalesUnreliable && <ProductRefBadge label="除外（頒布物）" />}
+                    {r.discontinued && <DiscontinuedBadge prominent />}
+                    {r.soldOut && <SoldOutBadge />}
+                  </span>
+                )}
+              </td>
+              <td className="tnum py-1.5 pr-2 text-right align-top">{qtyMasked(r.qty, masked)}</td>
+              <td className="tnum py-1.5 text-right align-top">{yenMasked(r.net, masked)}</td>
+            </tr>
+          ))}
+          <tr className="font-bold">
+            <td className="py-1.5 pr-2">合計</td>
+            <td className="tnum py-1.5 pr-2 text-right">{qtyMasked(totalQty, masked)}</td>
+            <td className="tnum py-1.5 text-right">{yenMasked(totalNet, masked)}</td>
+          </tr>
+        </tbody>
+      </table>
+      )}
+      {hiddenDiscontinuedCount > 0 && (
+        <p className="mt-2 text-xs text-[var(--dim)]">
+          廃盤の頒布物{hiddenDiscontinuedCount}件は表示設定で隠しています（合計には含まれています）。
+        </p>
+      )}
+
+      <button
+        type="button"
+        onClick={() => setSalesEditing(true)}
+        className="mt-3 mr-2 rounded-[var(--radius)] border border-[var(--border)] px-4 py-2 text-sm font-medium"
+      >
+        {data.rows.length > 0 ? "売上を追加・編集" : "売上を追加"}
+      </button>
+      <Modal
+        open={salesEditing}
+        onClose={() => setSalesEditing(false)}
+        label={`${dateLabel(date)}の売上を編集`}
+      >
+        <SalesEditor date={date} rows={data.rows} onClose={() => setSalesEditing(false)} />
+      </Modal>
+
+      <button
+        type="button"
+        onClick={() => setEditing(true)}
+        className="mt-3 rounded-[var(--radius)] border border-[var(--border)] px-4 py-2 text-sm font-medium"
+      >
+        {data.event ? "イベント情報を編集" : "イベントを登録"}
+      </button>
+      <Modal
+        open={editing}
+        onClose={() => setEditing(false)}
+        label={`${dateLabel(date)}のイベント${data.event ? "情報を編集" : "を登録"}`}
+      >
+        <EventForm
+          date={date}
+          initial={data.event}
+          initialFlags={data.flags}
+          onDone={() => setEditing(false)}
+        />
+      </Modal>
+
+      <InventoryMemoSection
+        date={date}
+        eventName={data.event?.eventName ?? ""}
+        memo={data.inventoryMemo}
+        hasSales={data.rows.length > 0}
+      />
+
+      {data.rows.length > 0 && totalNet === 0 && totalQty === 0 && (
+      <div className="mt-4 border-t border-dashed border-[var(--border)] pt-3">
+        {confirmingDelete ? (
+          <div>
+            <p className="text-sm">
+              {dateLabel(date)}の売上記録（{data.rows.length}頒布物）とイベント登録・フラグ・在庫メモをすべて削除します。この操作は取り消せません。
+            </p>
+            {deleteError && (
+              <p role="alert" className="mt-2 text-sm text-[var(--accent)]">
+                削除できませんでした：{deleteError}
+              </p>
+            )}
+            <div className="mt-2 flex flex-wrap gap-2">
+              <button
+                type="button"
+                disabled={removeDay.isPending}
+                onClick={() => removeDay.mutate()}
+                className="rounded-[var(--radius)] bg-[var(--accent)] px-4 py-2 text-sm font-bold text-white disabled:opacity-50"
+              >
+                {removeDay.isPending ? "削除中…" : "削除する"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirmingDelete(false)}
+                className="rounded-[var(--radius)] border border-[var(--border)] px-4 py-2 text-sm"
+              >
+                やめる
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <button
+              type="button"
+              onClick={() => {
+                setDeleteError(null);
+                setConfirmingDelete(true);
+              }}
+              className="px-1 py-1 text-sm text-[var(--accent)] underline"
+            >
+              この日を削除
+            </button>
+            <span className="text-xs text-[var(--dim)]">
+              売上0円・0冊の日は、台帳から取り除けます。
+            </span>
+          </div>
+        )}
+      </div>
+      )}
+    </div>
+  );
+}
+
+/** Day-level 「参考情報」 chip, shown on day rows and in the day detail. */
+export function FlagBadge() {
+  return (
+    <span className="inline-block rounded-full bg-[var(--accent-soft)] px-2 py-0.5 text-[11px] font-bold whitespace-nowrap text-[var(--accent)]">
+      参考情報
+    </span>
+  );
+}
+
+/**
+ * Event-type chip for one day: the manual setting when one is stored,
+ * otherwise classified from the registered event name (see
+ * eventType.ts). Renders nothing for unregistered days — their type
+ * is unknown, not 「その他」. With `hideOther`, a day whose type is
+ * the fallback （その他） renders nothing either — the イベント一覧
+ * passes it so unclassifiable days carry no chip there; the other
+ * DayRow consumers （都市別・未登録チェック） keep the chip.
+ */
+export function EventTypeBadge({
+  day,
+  hideOther = false,
+}: {
+  day: DaySummary;
+  hideOther?: boolean;
+}) {
+  const types = useEventTypes();
+  if (day.eventName === null) return null;
+  const resolved = resolveEventType(day.eventName, day.eventType, types);
+  if (hideOther && resolved === fallbackTypeKey(types)) return null;
+  const label = typeLabel(types, resolved);
+  return (
+    <span className="inline-block rounded-full bg-[var(--surface-alt)] px-2 py-0.5 text-[11px] font-medium whitespace-nowrap text-[var(--dim)]">
+      {label}
+    </span>
+  );
+}
+
+/** The flag chip for one day, or null when the flag is not set. */
+export function DayFlagBadges({ day }: { day: DaySummary }) {
+  if (!day.salesUnreliable) return null;
+  return (
+    <span className="mt-1 flex flex-wrap gap-1.5">
+      <FlagBadge />
+    </span>
+  );
+}
+
+/** Today as YYYY-MM-DD in the user's timezone (Asia/Tokyo). */
+function todayInTokyo(): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
+export function DayRow({
+  day,
+  open,
+  onToggle,
+  compareMode = false,
+  compareChecked = false,
+  onCompareChange,
+  hideOtherTypeBadge = false,
+}: {
+  day: DaySummary;
+  open: boolean;
+  onToggle: () => void;
+  /**
+   * 過去の頒布数を比較モード: when on, a checkbox appears at the
+   * left edge of the row so the day can be picked as a comparison
+   * column — but ONLY for days with sales. Days without sales
+   * (event registration only) render no checkbox (an alignment
+   * spacer instead) and can never be comparison targets. The
+   * checkbox sits OUTSIDE the row's toggle button (a checkbox
+   * inside a <button> would be invalid HTML and would toggle the
+   * detail).
+   */
+  compareMode?: boolean;
+  compareChecked?: boolean;
+  onCompareChange?: () => void;
+  /**
+   * When on, the event-type chip is omitted for days whose type is
+   * the fallback （その他）. Only the イベント一覧 passes this;
+   * 都市別 and 未登録チェック rows keep the chip.
+   */
+  hideOtherTypeBadge?: boolean;
+}) {
+  const masked = useMasked();
+  const registered = day.eventName !== null;
+  const missing = missingEventFields(day);
+  const place = [day.prefecture, day.city].filter(Boolean).join(" ");
+  // これから開催（今日以降・Asia/Tokyo基準）の行は薄く色付ける。
+  // 開いた行は従来どおり row-selected の強調が優先される
+  // （.row-selected は非レイヤーCSSなのでユーティリティより勝つ）。
+  const upcoming = day.date >= todayInTokyo();
+  return (
+    <div
+      data-day={day.date}
+      className={`border-b border-[var(--border)] ${
+        upcoming ? "bg-[var(--upcoming-bg)]" : "bg-[var(--surface)]"
+      } ${open ? "row-selected" : ""}`}
+    >
+      <div className="flex items-stretch">
+        {compareMode &&
+          (day.hasSales ? (
+            <label className="flex shrink-0 cursor-pointer items-center pr-1 pl-3">
+              <input
+                type="checkbox"
+                checked={compareChecked}
+                onChange={() => onCompareChange?.()}
+                aria-label={`${dateLabel(day.date)}${day.eventName ? ` ${day.eventName}` : ""}を過去の頒布数を比較の対象にする`}
+                className="h-5 w-5 shrink-0"
+                style={{ accentColor: "var(--accent)" }}
+              />
+            </label>
+          ) : (
+            // No sales on this day: no checkbox, so the day cannot
+            // be picked as a comparison target. The spacer keeps
+            // the row's content aligned with the checkable rows
+            // (pl-3 + w-5 + pr-1 = 2.25rem, matching the label).
+            <span aria-hidden className="w-9 shrink-0" />
+          ))}
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-expanded={open}
+          aria-label={`${dateLabel(day.date)}の詳細を${open ? "閉じる" : "開く"}`}
+          className="flex min-w-0 flex-1 items-center gap-3 px-4 py-3 text-left"
+        >
+        <div className="min-w-0 flex-1">
+          <p
+            className={`tnum text-xs ${
+              open ? "font-bold text-[var(--accent)]" : "text-[var(--dim)]"
+            }`}
+          >
+            {dateLabel(day.date)}
+            {open && <span className="ml-2">選択中</span>}
+          </p>
+          {registered ? (
+            <>
+              <p className="font-ledger truncate text-base font-bold">
+                {day.eventName || "（イベント名なし）"}
+              </p>
+              <p className="truncate text-xs text-[var(--dim)]">
+                {[place, day.venue].filter(Boolean).join("・") || "場所未入力"}
+              </p>
+              {missing.length > 0 && (
+                <p className="mt-0.5 text-xs font-medium text-[var(--accent)]">
+                  未入力：{missing.join("・")}
+                </p>
+              )}
+              <span className="mt-1 flex flex-wrap gap-1.5">
+                <EventTypeBadge day={day} hideOther={hideOtherTypeBadge} />
+                {day.salesUnreliable && <FlagBadge />}
+                {day.hasInventoryMemo && (
+                  <InventoryMemoBadge totalQty={day.inventoryTotalQty} />
+                )}
+              </span>
+            </>
+          ) : (
+            <>
+              <p className="mt-0.5 flex items-center gap-2">
+                <span className="stamp">イベント未登録</span>
+                {day.productCount > 0 && (
+                  <span className="text-xs text-[var(--dim)]">{day.productCount}頒布物</span>
+                )}
+              </p>
+              <DayFlagBadges day={day} />
+              {day.hasInventoryMemo && (
+                <span className="mt-1 flex flex-wrap gap-1.5">
+                  <InventoryMemoBadge totalQty={day.inventoryTotalQty} />
+                </span>
+              )}
+            </>
+          )}
+        </div>
+        <div className="shrink-0 text-right">
+          {day.hasSales ? (
+            <>
+              <p className="tnum text-sm font-bold">{yenMasked(day.net, masked)}</p>
+              <p className="tnum text-xs text-[var(--dim)]">{qtyMasked(day.qty, masked)}冊</p>
+            </>
+          ) : (
+            // Event registered ahead of time; no sales recorded yet.
+            <p className="text-xs font-medium whitespace-nowrap text-[var(--dim)]">売上なし</p>
+          )}
+        </div>
+        <span
+          aria-hidden
+          className={`shrink-0 ${open ? "font-bold text-[var(--accent)]" : "text-[var(--dim)]"}`}
+        >
+          {open ? "▲" : "▼"}
+        </span>
+        </button>
+      </div>
+      {open && <DayDetailView date={day.date} />}
+    </div>
+  );
+}
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Today (Asia/Tokyo) as YYYY-MM-DD — the new-event form's default date. */
+function todayTokyo(): string {
+  return new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Tokyo" }).format(new Date());
+}
+
+/**
+ * 「イベントを新規登録」 entry point for the ledger tab: pick any date —
+ * including one with no sales yet (e.g. an upcoming event) — and
+ * register its event info (name, venue, prefecture, city, note).
+ *
+ * It never silently overwrites: when the chosen date already has an
+ * event registered, the form is replaced by a notice plus a jump to
+ * that day in the ledger, where the normal edit form lives. When the
+ * date has sales but no event, the registration attaches to those
+ * sales, and the day's existing flags are loaded into the form so
+ * saving does not clear them.
+ */
+export function NewEventSection({ onOpenDay }: { onOpenDay: (date: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [date, setDate] = useState(todayTokyo);
+  const validDate = DATE_RE.test(date);
+  const detail = useQuery({
+    queryKey: ["day", date],
+    queryFn: () => api.getDayDetail({ date }),
+    enabled: open && validDate,
+  });
+  const existing = detail.data?.event ?? null;
+  const hasSales = (detail.data?.rows.length ?? 0) > 0;
+
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="w-full rounded-[var(--radius)] border border-dashed border-[var(--border)] bg-[var(--surface)] px-4 py-2.5 text-sm font-medium"
+      >
+        ＋ イベントを新規登録
+      </button>
+      <p className="mt-1 text-xs text-[var(--dim)]">
+        売上データのない日でも先に登録できます（イベント一覧に「売上なし」と表示されます）。
+      </p>
+      <Modal open={open} onClose={() => setOpen(false)} label="イベントを新規登録">
+      <div className="flex items-center justify-between gap-2">
+        <p className="font-ledger text-sm font-bold">イベントを新規登録</p>
+        <button
+          type="button"
+          onClick={() => setOpen(false)}
+          className="shrink-0 rounded-[var(--radius)] border border-[var(--border)] px-3 py-1.5 text-xs whitespace-nowrap"
+        >
+          閉じる
+        </button>
+      </div>
+      <div className="mt-3">
+        <label htmlFor="new-event-date" className={labelCls}>
+          日付
+        </label>
+        <input
+          id="new-event-date"
+          type="date"
+          className={inputCls}
+          value={date}
+          aria-invalid={!validDate || undefined}
+          aria-describedby={!validDate ? "new-event-date-error" : undefined}
+          onChange={(e) => setDate(e.target.value)}
+        />
+      </div>
+      {!validDate && (
+        <p role="alert" id="new-event-date-error" className="mt-2 text-sm text-[var(--accent)]">
+          日付を選んでください。
+        </p>
+      )}
+      {validDate && detail.isPending && (
+        <p className="mt-2 text-sm text-[var(--dim)]">その日の登録状況を確認中…</p>
+      )}
+      {validDate && detail.error && (
+        <p role="alert" className="mt-2 text-sm text-[var(--accent)]">
+          登録状況を確認できませんでした：{String(detail.error)}
+        </p>
+      )}
+      {validDate && detail.data && existing && (
+        <div className="mt-3 rounded-[var(--radius)] bg-[var(--surface-alt)] p-3">
+          <p className="text-sm">
+            {dateLabel(date)}には、すでに「{existing.eventName || "（イベント名なし）"}」が登録されています。
+          </p>
+          <p className="mt-1 text-sm text-[var(--dim)]">
+            新規登録で上書きはされません。内容を変えるときは、その日の行から編集してください。
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              setOpen(false);
+              onOpenDay(date);
+            }}
+            className="mt-2 rounded-[var(--radius)] bg-[var(--accent)] px-4 py-2 text-sm font-bold text-white"
+          >
+            イベント一覧でその日を開く
+          </button>
+        </div>
+      )}
+      {validDate && detail.data && !existing && (
+        <>
+          {hasSales && (
+            <p className="mt-2 text-sm text-[var(--dim)]">
+              この日には売上記録があります。登録すると、その日の売上と結びつきます。
+            </p>
+          )}
+          <div className="mt-4 border-t border-dashed border-[var(--border)] pt-3">
+            <EventForm
+              key={date}
+              date={date}
+              initial={null}
+              initialFlags={detail.data.flags}
+              requireEventName
+              onDone={() => setOpen(false)}
+              onSaved={() => onOpenDay(date)}
+            />
+          </div>
+        </>
+      )}
+      </Modal>
+    </div>
+  );
+}

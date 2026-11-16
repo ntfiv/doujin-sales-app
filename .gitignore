@@ -1,0 +1,28 @@
+# Runtime database (contains real data — never commit)
+app.db
+app.db-*
+*.db
+*.db-shm
+*.db-wal
+
+# Dependencies and caches
+node_modules/
+.bun-cache/
+
+# Build outputs
+dist/
+client/dist/
+client/dist-cvm/
+server/dist/
+.space-build/
+.space-build-cvm/
+
+# Audit / inspection artifacts
+audits/
+
+# Local build info
+*.tsbuildinfo
+.harness/
+
+# Planning notes (may contain verbatim quotes and aggregates)
+DATA-PLAN.md
