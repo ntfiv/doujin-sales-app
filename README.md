@@ -23,3 +23,7 @@ Muse のスペース「同人誌売上管理」のソースコードのアーカ
 - `client/src/` — フロントエンド（React / TypeScript）
 - `server/src/` — サーバー側アクション・スキーマ・seed
 - `drizzle/` — DB マイグレーション（0001〜0014）
+
+## スペースとして再現するには
+
+- このソースから Muse のスペースとして再現する手順は [SPACE-REPRODUCTION-GUIDE.md](SPACE-REPRODUCTION-GUIDE.md)（「Museスペースのソース保存と再現 手順書」）にまとめています。受け取った人は、ソースを自分の Muse のワークスペースに置き、手順書のパート2の依頼文例を自分の Muse に渡してください。
