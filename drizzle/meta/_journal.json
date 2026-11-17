@@ -99,6 +99,13 @@
       "when": 1794841548291,
       "tag": "0014_add_inventory_memos_tables",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1794849333115,
+      "tag": "0015_add_category_to_product_releases",
+      "breakpoints": true
     }
   ]
 }

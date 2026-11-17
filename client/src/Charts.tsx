@@ -46,7 +46,7 @@ const tooltipStyle = {
   fontSize: 12,
 } as const;
 
-/** Slanted-hatch pattern used for 「売り上げは参考情報」 portions / items. */
+/** Slanted-hatch pattern used for 「売上は参考情報」 portions / items. */
 function HatchDef({ id }: { id: string }) {
   return (
     <defs>
@@ -333,7 +333,7 @@ function TrendSection({
           )}
           {refDays > 0 && (
             <p className="mt-1">
-              「売り上げは参考情報」の日（{refDays}日）は、棒の中で斜線部分に分けて表示しています。
+              「売上は参考情報」の日（{refDays}日）は、棒の中で斜線部分に分けて表示しています。
             </p>
           )}
         </div>
@@ -590,7 +590,7 @@ function ProductsSection({
             全{totalCount}種のうち上位{RANK_LIMIT}種を表示（「任意の金額」は含みません）。
           </p>
           <p className="mt-1">
-            バーをタップすると、上の「頒布物別グラフ」にその頒布物が表示されます。
+            バーをタップすると、「頒布物別グラフ」にその頒布物が表示されます。
           </p>
           {refInRank && (
             <p className="mt-1">
@@ -705,7 +705,7 @@ function FocusTooltip(props: {
       {p.isFirst && !hideFirstBadge && (
         <p>{p.prefecture ? `${p.prefecture}で初頒布` : "同県で初頒布"}</p>
       )}
-      {p.salesUnreliable && <p>（売り上げは参考情報の日）</p>}
+      {p.salesUnreliable && <p>（売上は参考情報の日）</p>}
     </div>
   );
 }
@@ -917,11 +917,11 @@ function ProductFocusSection(props: {
             {gran === "event" && hasFirst && (
               <p>
                 <span aria-hidden className="mr-1 inline-block h-2.5 w-2.5 rounded-sm bg-[var(--accent)]" />
-                の棒は「同県で初頒布」の日です（発行日がその県での前回参加日より後に発行された本の、その県での初頒布。前回参加以前に発行された本は含みません。都道府県未登録の日は全体での初回で判定）。
+                の棒は、その都道府県で初めて頒布を行ったイベントとなります。（一覧で同県で初頒布とマークしているもの）
               </p>
             )}
             {gran === "event" && hasRefDay && (
-              <p className="mt-1">斜線の棒は「売り上げは参考情報の日」です。</p>
+              <p className="mt-1">斜線の棒は「売上は参考情報の日」です。</p>
             )}
             {prefRows.some((r) => r.name === "未登録") && (
               <p className="mt-1">
@@ -987,7 +987,7 @@ function ProductFocusSection(props: {
 
           {(current.salesUnreliable || current.discontinued) && (
             <div className="mt-3 flex flex-wrap items-center gap-1.5">
-              {current.salesUnreliable && <span className="stamp">参考情報</span>}
+              {current.salesUnreliable && <span className="stamp">除外</span>}
               {current.discontinued && <span className="stamp">廃盤</span>}
             </div>
           )}
@@ -1020,7 +1020,7 @@ function ProductFocusSection(props: {
             </div>
           </div>
           <p className="tnum mt-1.5 text-xs text-[var(--dim)]">
-            販売期間: {disp?.firstDate ?? "―"} 〜 {disp?.lastDate ?? "―"} ・ 1日平均{" "}
+            販売期間: {disp?.firstDate || "―"} 〜 {disp?.lastDate || "―"} ・ 1日平均{" "}
             {disp && disp.dayCount > 0 ? qtyMasked(disp.qty / disp.dayCount, masked) : "0"}冊
           </p>
 
@@ -1176,7 +1176,7 @@ function ProductFocusSection(props: {
                         </p>
                       )}
                       {d.salesUnreliable && (
-                        <p className="text-xs text-[var(--dim)]">（売り上げは参考情報の日）</p>
+                        <p className="text-xs text-[var(--dim)]">（売上は参考情報の日）</p>
                       )}
                       {props.onOpenDay && (
                         <button
@@ -1318,7 +1318,7 @@ function TypeSection({ dash }: { dash?: DashSectionProps }) {
           <p className="mt-2 text-xs text-[var(--dim)]">
             種別はイベント名からの推定です（手動設定した日はそちらで集計）。
             {refDays > 0 &&
-              `「売り上げは参考情報」の日（${refDays}日）も含めた内訳です。`}
+              `「売上は参考情報」の日（${refDays}日）も含めた内訳です。`}
           </p>
         </div>
       }

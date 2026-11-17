@@ -5,6 +5,12 @@ import { matchesQuery } from "./search";
 import { dateLabel } from "./format";
 import { inputCls, labelCls } from "./Products";
 import type { DaySummary } from "./Ledger";
+import { actionFields } from "@hatch/space-sdk/fields" with { type: "macro" };
+import type { Actions } from "../../server/src/actions";
+
+// Input limits come from the actions' request schemas, so the form
+// fields and the server can never disagree.
+const FIELDS = actionFields<typeof Actions>();
 import {
 classifyEvent,
 fallbackTypeKey,
@@ -495,6 +501,7 @@ export function EventTypeManageSection({ days }: { days: DaySummary[] }) {
                       種別名
                     </label>
                     <input
+                      {...FIELDS.saveEventTypes.types.label}
                       id={`type-label-${i}`}
                       className={inputCls}
                       value={r.label}

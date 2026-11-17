@@ -11,7 +11,12 @@ import { createPortal } from "react-dom";
  * - Initial focus goes to the first field (input / select / textarea),
  *   or to an element marked [data-autofocus] when present.
  * - Clicking the backdrop (the dialog element itself, outside its
- *   framed content box) closes it.
+ *   framed content box) closes it. The padding lives on the inner
+ *   .modal-frame wrapper, NOT on the dialog element: a tap in the
+ *   padded margin around the content therefore lands on the frame
+ *   and never counts as a backdrop click (with the padding on the
+ *   dialog itself, the whole padded ring around the frame closed
+ *   the dialog — reported 2026-11-17 for the イベントメモ editor).
  * - On close — however it was triggered — focus returns to the
  *   element that opened the dialog.
  *
@@ -21,11 +26,22 @@ import { createPortal } from "react-dom";
 export function Modal({
   open,
   onClose,
+  closeVeto,
   label,
   children,
 }: {
   open: boolean;
   onClose: () => void;
+  /**
+   * Optional Esc veto: when it returns true, the native Esc close
+   * is prevented and the dialog stays open. For dialogs whose
+   * onClose flushes state asynchronously (the イベントメモ
+   * editor): Esc closes the dialog natively BEFORE onClose runs,
+   * so a close guard that refuses (e.g. an unsavable URL is still
+   * typed) would otherwise leave the parent believing the dialog
+   * is open while it is already gone.
+   */
+  closeVeto?: () => boolean;
   /** Accessible name for the dialog. */
   label: string;
   children: ReactNode;
@@ -34,6 +50,8 @@ export function Modal({
   const invokerRef = useRef<HTMLElement | null>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+  const closeVetoRef = useRef(closeVeto);
+  closeVetoRef.current = closeVeto;
 
   useEffect(() => {
     if (!open) return;
@@ -46,7 +64,12 @@ export function Modal({
       dlg.querySelector<HTMLElement>("[data-autofocus]") ??
       dlg.querySelector<HTMLElement>("input, select, textarea");
     target?.focus();
+    const onCancel = (e: Event) => {
+      if (closeVetoRef.current?.()) e.preventDefault();
+    };
+    dlg.addEventListener("cancel", onCancel);
     return () => {
+      dlg.removeEventListener("cancel", onCancel);
       if (dlg.open) dlg.close();
       const invoker = invokerRef.current;
       if (invoker && document.contains(invoker)) invoker.focus();
@@ -68,7 +91,7 @@ export function Modal({
         if (e.target === e.currentTarget) onCloseRef.current();
       }}
     >
-      {children}
+      <div className="modal-frame">{children}</div>
     </dialog>,
     document.body,
   );

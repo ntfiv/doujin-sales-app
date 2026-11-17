@@ -1,4 +1,11 @@
-import { useMemo, useState, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type ApiResponse } from "./api";
 import { Modal } from "./Modal";
@@ -17,11 +24,19 @@ import {
 byReleaseDateDesc,
 DiscontinuedBadge,
 FirstAppearanceBadge,
+NewProductDialog,
 ProductRefBadge,
 SoldOutBadge,
 } from "./Products";
 import { matchesQuery } from "./search";
 import { MasterCandidatePicker } from "./MasterCandidates";
+import { actionFields } from "@hatch/space-sdk/fields" with { type: "macro" };
+import type { Actions } from "../../server/src/actions";
+
+// Input limits (maxLength / min / max) come from the actions'
+// request schemas, so the form fields and the server can never
+// disagree.
+const FIELDS = actionFields<typeof Actions>();
 
 export type DaySummary = ApiResponse<typeof api, "getOverview">["days"][number];
 type DayDetail = ApiResponse<typeof api, "getDayDetail">;
@@ -227,6 +242,7 @@ export function EventForm({
             イベント名{requireEventName ? "（必須）" : ""}
           </label>
           <input
+            {...FIELDS.saveEvent.eventName}
             id={`ev-name-${date}`}
             className={inputCls}
             value={eventName}
@@ -245,6 +261,7 @@ export function EventForm({
             開催施設
           </label>
           <input
+            {...FIELDS.saveEvent.venue}
             id={`ev-venue-${date}`}
             className={inputCls}
             value={venue}
@@ -287,6 +304,7 @@ export function EventForm({
               市区町村
             </label>
             <input
+              {...FIELDS.saveEvent.city}
               id={`ev-city-${date}`}
               className={inputCls}
               value={city}
@@ -300,6 +318,7 @@ export function EventForm({
             メモ
           </label>
           <input
+            {...FIELDS.saveEvent.note}
             id={`ev-note-${date}`}
             className={inputCls}
             value={note}
@@ -332,11 +351,6 @@ export function EventForm({
               ▼
             </span>
           </div>
-          <p className="mt-1 text-xs text-[var(--dim)]">
-            {eventType
-              ? "手動設定が優先されます。「自動判定」に戻すと推定に戻ります。"
-              : "イベント名から自動判定しています。違う場合は手動で選べます。"}
-          </p>
         </div>
         <fieldset className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-3 py-2">
           <legend className="px-1 text-xs font-medium text-[var(--dim)]">フラグ</legend>
@@ -347,16 +361,16 @@ export function EventForm({
             <input
               id={`ev-flag-ref-${date}`}
               type="checkbox"
-              aria-label="売り上げは参考情報"
+              aria-label="売上は参考情報"
               checked={salesUnreliable}
               onChange={(e) => setSalesUnreliable(e.target.checked)}
               className="mt-0.5 h-4 w-4 shrink-0"
               style={{ accentColor: "var(--accent)" }}
             />
             <span>
-              売り上げは参考情報
+              売上は参考情報
               <span className="block text-xs text-[var(--dim)]">
-                このイベントでの売上データが完全ではない場合にチェック。（売り上げがない、もしくは『任意の金額』のみで頒布物別内訳がない日）
+                このイベントでの売上データが完全ではない場合にチェック。（売上がない、もしくは『任意の金額』のみで頒布物別内訳がない日）
               </span>
             </span>
           </label>
@@ -404,14 +418,19 @@ type DaySalesRow = DayDetail["rows"][number];
  * already-registered product and entering 冊数・金額， edit an existing
  * row's numbers, or delete a row. Each row also carries a 完売
  * checkbox — that day the copies of that product brought to the event
- * sold out (stock ran short). New product creation is not offered
- * here — products appear once they have sales (e.g. via a Square CSV
- * import). Manual rows are ordinary sales rows: every total and chart
- * picks them up immediately. Note that re-importing a Square CSV later
- * replaces the row for any date × product present in that CSV (the
- * same replace rule as always); rows for products absent from the CSV
- * are left untouched. The 完売 flag is not part of the CSV, so it
- * survives a re-import.
+ * sold out (stock ran short). A brand-new product can also be
+ * registered from here （新しい頒布物を登録, the shared 新規登録
+ * dialog): once registered it is selected in the add form, ready for
+ * its first row. The add form's product picker lists products in the
+ * app-wide release order (newest first, unset dates last) and starts
+ * with 除外 / 廃盤 products hidden (two checkboxes, both on by
+ * default); the filters apply to the picker only — rows already
+ * recorded for the day always stay visible and editable. Manual rows are ordinary sales rows: every total and
+ * chart picks them up immediately. Note that re-importing a Square
+ * CSV later replaces the row for any date × product present in that
+ * CSV (the same replace rule as always); rows for products absent
+ * from the CSV are left untouched. The 完売 flag is not part of the
+ * CSV, so it survives a re-import.
  */
 function SalesEditor({
   date,
@@ -450,6 +469,15 @@ function SalesEditor({
   const [addQty, setAddQty] = useState("");
   const [addNet, setAddNet] = useState("");
   const [addSoldOut, setAddSoldOut] = useState(false);
+  // Add-picker filters, both on by default (same wording and default
+  // as the 頒布物一覧 tab): while on, 除外 / 廃盤 products are left
+  // out of the add picker's options. Picker only — existing rows of
+  // the day are never hidden.
+  const [hideExcluded, setHideExcluded] = useState(true);
+  const [hideDiscontinued, setHideDiscontinued] = useState(true);
+  // 新規登録 dialog opened from the add form; a product registered
+  // there is selected in the add form straight away.
+  const [creatingProduct, setCreatingProduct] = useState(false);
 
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: ["overview"] });
@@ -532,7 +560,31 @@ function SalesEditor({
   };
 
   const inDay = new Set(rows.map((r) => r.product));
-  const addable = (productsQuery.data?.products ?? []).filter((p) => !inDay.has(p.product));
+  // Picker candidates: every registered product not yet recorded for
+  // this day, in the app-wide release order (effective release date,
+  // newest first; unset dates sort last via the placeholder).
+  const addableAll = (productsQuery.data?.products ?? [])
+    .filter((p) => !inDay.has(p.product))
+    .sort(byReleaseDateDesc);
+  const addable = addableAll.filter(
+    (p) =>
+      (!hideExcluded || !p.salesUnreliable) &&
+      (!hideDiscontinued || !p.discontinued),
+  );
+  // Turning a filter on can hide the currently picked product; drop
+  // the pick then so the select never points at a hidden option.
+  const applyHideFilters = (excluded: boolean, discontinued: boolean) => {
+    setHideExcluded(excluded);
+    setHideDiscontinued(discontinued);
+    const picked = addableAll.find((p) => p.product === addProduct);
+    if (
+      picked &&
+      ((excluded && picked.salesUnreliable) ||
+        (discontinued && picked.discontinued))
+    ) {
+      setAddProduct("");
+    }
+  };
   const numInputCls =
     "w-full rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-2 py-1.5 text-base text-[var(--text)]";
 
@@ -565,6 +617,7 @@ function SalesEditor({
                         冊数
                       </label>
                       <input
+                        {...FIELDS.saveSalesRow.qty}
                         id={`se-qty-${r.product}`}
                         type="number"
                         inputMode="numeric"
@@ -581,6 +634,7 @@ function SalesEditor({
                         金額（売上・円）
                       </label>
                       <input
+                        {...FIELDS.saveSalesRow.net}
                         id={`se-net-${r.product}`}
                         type="number"
                         inputMode="numeric"
@@ -692,18 +746,74 @@ function SalesEditor({
       )}
 
       <div className="mt-3 border-t border-dashed border-[var(--border)] pt-3">
-        <p className="text-sm font-bold">売上を追加</p>
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="text-sm font-bold">売上を追加</p>
+          <button
+            type="button"
+            onClick={() => setCreatingProduct(true)}
+            className="ml-auto rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-sm font-medium"
+          >
+            新しい頒布物を登録
+          </button>
+        </div>
+        <NewProductDialog
+          open={creatingProduct}
+          onClose={() => setCreatingProduct(false)}
+          onCreated={(name) => {
+            void queryClient.invalidateQueries({ queryKey: ["products"] });
+            setAddProduct(name);
+            setAddInvalid({ product: false, qty: false, net: false });
+          }}
+        />
         {productsQuery.isPending ? (
           <p className="mt-2 text-sm text-[var(--dim)]">頒布物の一覧を読み込み中…</p>
         ) : productsQuery.error ? (
           <p role="alert" className="mt-2 text-sm text-[var(--accent)]">
             頒布物の一覧を読み込めませんでした：{String(productsQuery.error)}
           </p>
-        ) : addable.length === 0 ? (
+        ) : addableAll.length === 0 ? (
           <p className="mt-2 text-sm text-[var(--dim)]">
-            追加できる頒布物がありません（すべてこの日に登録済みです）。新しい頒布物は各種CSV取込で増えます。
+            追加できる頒布物がありません（すべてこの日に登録済みです）。新しい本は上の「新しい頒布物を登録」から登録できます。
           </p>
         ) : (
+          <>
+          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
+            <label
+              htmlFor={`se-add-hide-ref-${date}`}
+              className="flex cursor-pointer items-center gap-1.5 text-sm"
+            >
+              <input
+                id={`se-add-hide-ref-${date}`}
+                type="checkbox"
+                aria-label="除外を非表示"
+                checked={hideExcluded}
+                onChange={(e) => applyHideFilters(e.target.checked, hideDiscontinued)}
+                className="h-4 w-4 shrink-0"
+                style={{ accentColor: "var(--accent)" }}
+              />
+              除外を非表示
+            </label>
+            <label
+              htmlFor={`se-add-hide-disc-${date}`}
+              className="flex cursor-pointer items-center gap-1.5 text-sm"
+            >
+              <input
+                id={`se-add-hide-disc-${date}`}
+                type="checkbox"
+                aria-label="廃盤を非表示"
+                checked={hideDiscontinued}
+                onChange={(e) => applyHideFilters(hideExcluded, e.target.checked)}
+                className="h-4 w-4 shrink-0"
+                style={{ accentColor: "var(--accent)" }}
+              />
+              廃盤を非表示
+            </label>
+          </div>
+          {addable.length === 0 ? (
+            <p className="mt-2 text-sm text-[var(--dim)]">
+              除外・廃盤を非表示にしているため、追加できる頒布物がありません。
+            </p>
+          ) : (
           <div className="mt-2 grid grid-cols-[minmax(0,1fr)] gap-2">
             <div>
               <label htmlFor={`se-add-product-${date}`} className={labelCls}>
@@ -740,6 +850,7 @@ function SalesEditor({
                   冊数
                 </label>
                 <input
+                  {...FIELDS.saveSalesRow.qty}
                   id={`se-add-qty-${date}`}
                   type="number"
                   inputMode="numeric"
@@ -757,6 +868,7 @@ function SalesEditor({
                   金額（売上・円）
                 </label>
                 <input
+                  {...FIELDS.saveSalesRow.net}
                   id={`se-add-net-${date}`}
                   type="number"
                   inputMode="numeric"
@@ -801,6 +913,8 @@ function SalesEditor({
               </button>
             </div>
           </div>
+          )}
+          </>
         )}
       </div>
 
@@ -809,30 +923,72 @@ function SalesEditor({
           {error}
         </p>
       )}
-      <p className="mt-3 text-xs text-[var(--dim)]">
-        ここで入力した売上は、その日の合計・総計・グラフにすぐ反映されます。金額は純売上として記録されます（総売上も同額）。各種CSVを再取込すると、その日×その頒布物の行はCSVの集計で置き換わります（手入力の行も対象）。CSVにない頒布物の行は残ります。「完売」はCSVにない情報なので、再取込しても消えません。
-      </p>
     </div>
   );
 }
 
-type InventoryMemoData = NonNullable<DayDetail["inventoryMemo"]>;
-
 /**
- * 在庫メモ chip for a day row: the day has a saved inventory memo.
+ * イベントメモ chip for a day row: the day has a saved inventory memo.
  * When counts are recorded, the total rides along （合計N冊）.
  */
 export function InventoryMemoBadge({ totalQty }: { totalQty: number }) {
   const masked = useMasked();
   return (
     <span className="inline-block rounded-full bg-[var(--surface-alt)] px-2 py-0.5 text-[11px] font-medium whitespace-nowrap text-[var(--dim)]">
-      在庫メモ{totalQty > 0 ? `（合計${qtyMasked(totalQty, masked)}冊）` : ""}
+      イベントメモ{totalQty > 0 ? `（合計${qtyMasked(totalQty, masked)}冊）` : ""}
     </span>
   );
 }
 
+/** Payload of one イベントメモ save (what saveInventoryMemo stores). */
+type MemoPayload = {
+  url: string;
+  memo: string;
+  items: { product: string; qty: number }[];
+};
+
 /**
- * 在庫メモ editor for one day: one URL (official site etc.), the
+ * Counts worth storing from the editor's string fields: positive
+ * integers only (blank / 0 / invalid entries are left out), sorted
+ * by product so two payloads compare stably.
+ */
+function memoItemsFromQuantities(
+  qs: Record<string, string>,
+): { product: string; qty: number }[] {
+  return Object.entries(qs)
+    .map(([product, v]) => ({ product, qty: Number(v) }))
+    .filter((i) => Number.isInteger(i.qty) && i.qty > 0)
+    .sort((a, b) => (a.product < b.product ? -1 : a.product > b.product ? 1 : 0));
+}
+
+/** Every count field must be blank or a non-negative integer. */
+function memoQuantitiesValid(qs: Record<string, string>): boolean {
+  for (const v of Object.values(qs)) {
+    if (v.trim() === "") continue;
+    const n = Number(v);
+    if (!Number.isInteger(n) || n < 0 || n > 100000) return false;
+  }
+  return true;
+}
+
+function memoPayloadKey(p: MemoPayload): string {
+  return JSON.stringify([p.url, p.memo, p.items.map((i) => [i.product, i.qty])]);
+}
+
+/** Trimmed URL plus whether it may be saved (empty, or http/https). */
+function memoUrlState(raw: string): { trimmed: string; valid: boolean } {
+  const trimmed = raw.trim();
+  if (trimmed === "") return { trimmed, valid: true };
+  try {
+    const u = new URL(trimmed);
+    return { trimmed, valid: u.protocol === "http:" || u.protocol === "https:" };
+  } catch {
+    return { trimmed, valid: false };
+  }
+}
+
+/**
+ * イベントメモ editor for one day: one URL (official site etc.), the
  * per-product counts of copies sent / to bring, and a free memo.
  * The product picker is the registered product list minus 廃盤 and
  * 除外 products — those never appear here (per the user's rule).
@@ -840,18 +996,49 @@ export function InventoryMemoBadge({ totalQty }: { totalQty: number }) {
  * saved earlier but has since become 廃盤/除外 is hidden from the
  * picker, yet its saved count is carried through an edit unchanged
  * (and still shown in the read-only view) rather than silently
- * dropped. Clearing every field and saving deletes the memo.
+ * dropped. Clearing every field deletes the memo.
+ *
+ * Autosave (2026-11-17, user request): there is no save button.
+ * About a second after the input settles, the current values are
+ * saved through saveInventoryMemo, and the footer shows the save
+ * state （未保存の変更があります / 保存中… / 保存しました /
+ * 保存できませんでした）. A failed save keeps the input intact so
+ * it can be retried by typing on or by closing. Closing the dialog
+ * — the 閉じる buttons, the backdrop, or Esc — first flushes any
+ * pending change through the close guard registered with the
+ * parent section; the dialog only closes once everything savable
+ * is stored. While the typed URL is not a valid http/https URL
+ * yet, only the URL is held back (the payload keeps the last saved
+ * URL and a note shows under the field); the memo and counts still
+ * save, and the dialog refuses to close (Esc included, via the
+ * Modal's close veto) until the URL is fixed or cleared, so the
+ * typed URL is never silently discarded. The footer's リセット
+ * button clears THIS date's memo only:
+ * after a one-tap inline confirmation it cancels any pending
+ * autosave, empties the fields, and immediately saves the empty
+ * payload, which deletes the stored memo — other dates are
+ * untouched, and the emptied fields can never resurrect the old
+ * content through a later autosave.
  */
 function InventoryMemoEditor({
   date,
   eventName,
   initial,
   onClose,
+  registerCloseGuard,
 }: {
   date: string;
   eventName: string;
   initial: DayDetail["inventoryMemo"];
   onClose: () => void;
+  /** Hands the parent section the close guard (see
+   * InventoryMemoSection's requestClose); null unregisters it.
+   * flush saves pending changes and reports whether the dialog
+   * may close; veto is the synchronous Esc veto (true while the
+   * typed URL is invalid, so Esc cannot discard it either). */
+  registerCloseGuard: (
+    guard: { flush: () => Promise<boolean>; veto: () => boolean } | null,
+  ) => void;
 }) {
   const queryClient = useQueryClient();
   const productsQuery = useQuery({
@@ -867,27 +1054,176 @@ function InventoryMemoEditor({
   });
   const [search, setSearch] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [urlInvalid, setUrlInvalid] = useState(false);
   const [qtyInvalid, setQtyInvalid] = useState(false);
+  const [status, setStatus] = useState<
+    "idle" | "unsaved" | "saving" | "saved" | "error"
+  >("idle");
+  const [confirmingReset, setConfirmingReset] = useState(false);
+  // Whether a memo with content is currently stored for this date;
+  // together with the current input it drives the リセット
+  // button's disabled state.
+  const [savedExists, setSavedExists] = useState(
+    () =>
+      Boolean(
+        initial &&
+          (initial.url !== "" ||
+            initial.memo.trim() !== "" ||
+            initial.items.length > 0),
+      ),
+  );
 
-  const invalidate = () => {
+  // The newest field values, mirrored into a ref so the serialized
+  // save routine always reads the latest input — even while a
+  // previous save is still in flight.
+  const valuesRef = useRef({ url, memo, quantities });
+  valuesRef.current = { url, memo, quantities };
+  // The payload as last stored on the server. Autosave saves only
+  // when the current payload differs from this; while the typed
+  // URL is invalid, the payload keeps this URL （URLだけ保留）.
+  const savedRef = useRef<MemoPayload>({
+    url: initial?.url ?? "",
+    memo: initial?.memo ?? "",
+    items: (initial?.items ?? []).map((i) => ({ product: i.product, qty: i.qty })),
+  });
+  const timerRef = useRef<number | null>(null);
+  // Save calls are chained through this promise so two saves never
+  // run at once; a queued pass re-reads the newest values.
+  const chainRef = useRef<Promise<unknown>>(Promise.resolve());
+
+  const invalidate = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: ["overview"] });
     void queryClient.invalidateQueries({ queryKey: ["day", date] });
     void queryClient.invalidateQueries({ queryKey: ["cities"] });
-  };
+  }, [queryClient, date]);
 
-  const save = useMutation({
-    mutationFn: async (v: {
-      url: string;
-      memo: string;
-      items: { product: string; qty: number }[];
-    }) => await api.saveInventoryMemo({ date, ...v }),
-    onSuccess: () => {
-      invalidate();
-      onClose();
-    },
-    onError: (e) => setError(String(e)),
-  });
+  /**
+   * One serialized save pass: validates the counts, builds the
+   * payload (holding the URL back while it is invalid), and stores
+   * it when it differs from the last saved payload. Loops so edits
+   * typed during a save are picked up by a follow-up pass instead
+   * of being lost. Resolves true when everything savable is stored
+   * (or there is nothing to store), false when no save could be
+   * made (invalid counts, or the save itself failed).
+   */
+  const runSave = useCallback((): Promise<boolean> => {
+    const task = async (): Promise<boolean> => {
+      for (let pass = 0; pass < 5; pass++) {
+        const cur = valuesRef.current;
+        if (!memoQuantitiesValid(cur.quantities)) {
+          setQtyInvalid(true);
+          setError("冊数は0以上の整数で入力してください。");
+          setStatus("unsaved");
+          return false;
+        }
+        setQtyInvalid(false);
+        const urlState = memoUrlState(cur.url);
+        const payload: MemoPayload = {
+          url: urlState.valid ? urlState.trimmed : savedRef.current.url,
+          memo: cur.memo,
+          items: memoItemsFromQuantities(cur.quantities),
+        };
+        if (memoPayloadKey(payload) === memoPayloadKey(savedRef.current)) {
+          setError(null);
+          setStatus("saved");
+          return true;
+        }
+        setStatus("saving");
+        try {
+          await api.saveInventoryMemo({ date, ...payload });
+        } catch (e) {
+          setStatus("error");
+          setError(`保存できませんでした：${String(e)}`);
+          return false;
+        }
+        savedRef.current = payload;
+        setSavedExists(
+          payload.url !== "" || payload.memo.trim() !== "" || payload.items.length > 0,
+        );
+        setError(null);
+        setStatus("saved");
+        invalidate();
+      }
+      return true;
+    };
+    const p = chainRef.current.then(task, task);
+    chainRef.current = p.then(
+      () => undefined,
+      () => undefined,
+    );
+    return p;
+  }, [date, invalidate]);
+
+  // Debounced autosave: about a second after the last change to
+  // the URL, the counts, or the memo, save whatever changed. The
+  // first render is skipped — merely opening the editor saves
+  // nothing.
+  const firstRenderRef = useRef(true);
+  useEffect(() => {
+    if (firstRenderRef.current) {
+      firstRenderRef.current = false;
+      return;
+    }
+    setStatus((s) => (s === "saving" ? s : "unsaved"));
+    if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    timerRef.current = window.setTimeout(() => {
+      timerRef.current = null;
+      void runSave();
+    }, 1000);
+    return () => {
+      if (timerRef.current !== null) {
+        window.clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+    };
+  }, [url, memo, quantities, runSave]);
+
+  // Close guard for the parent section: cancel the pending
+  // debounce and flush immediately. The dialog closes only when
+  // this resolves true: a failed save keeps it (and the typed
+  // input) open, and so does a still-invalid URL — the memo and
+  // counts are flushed, but the unsavable URL text is never
+  // silently discarded by a close.
+  const flushForClose = useCallback(async (): Promise<boolean> => {
+    if (timerRef.current !== null) {
+      window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    const ok = await runSave();
+    if (!ok) return false;
+    if (!memoUrlState(valuesRef.current.url).valid) {
+      setError("URLの形式が正しくないため閉じられません。URLを直すか、空にしてから閉じてください。");
+      return false;
+    }
+    return true;
+  }, [runSave]);
+
+  useEffect(() => {
+    registerCloseGuard({
+      flush: flushForClose,
+      veto: () => !memoUrlState(valuesRef.current.url).valid,
+    });
+    return () => registerCloseGuard(null);
+  }, [registerCloseGuard, flushForClose]);
+
+  // リセット: cancel the pending autosave first, empty every
+  // field, then save the empty payload at once (the server deletes
+  // the memo). valuesRef is updated synchronously, so neither this
+  // save nor the autosave the state change schedules can resurrect
+  // the pre-reset content.
+  const doReset = useCallback(async () => {
+    setConfirmingReset(false);
+    if (timerRef.current !== null) {
+      window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    valuesRef.current = { url: "", memo: "", quantities: {} };
+    setUrl("");
+    setMemo("");
+    setQuantities({});
+    setQtyInvalid(false);
+    setError(null);
+    await runSave();
+  }, [runSave]);
 
   const allProducts = productsQuery.data?.products ?? [];
   // Picker list: registered products except 廃盤 and 除外， newest
@@ -910,57 +1246,34 @@ function InventoryMemoEditor({
   );
   const visible = eligible.filter((p) => matchesQuery(search, p.product));
 
-  const enteredItems = Object.entries(quantities)
-    .map(([product, v]) => ({ product, qty: Number(v) }))
-    .filter((i) => Number.isInteger(i.qty) && i.qty > 0);
+  const enteredItems = memoItemsFromQuantities(quantities);
   const enteredTotal = enteredItems.reduce((s, i) => s + i.qty, 0);
-
-  const submit = () => {
-    setError(null);
-    const trimmedUrl = url.trim();
-    if (trimmedUrl !== "") {
-      let ok = false;
-      try {
-        const u = new URL(trimmedUrl);
-        ok = u.protocol === "http:" || u.protocol === "https:";
-      } catch {
-        ok = false;
-      }
-      if (!ok) {
-        setUrlInvalid(true);
-        setError("URLは http:// または https:// で始まる形で入力してください。");
-        return;
-      }
-    }
-    setUrlInvalid(false);
-    // Every count field must be blank or a non-negative integer.
-    for (const v of Object.values(quantities)) {
-      if (v.trim() === "") continue;
-      const n = Number(v);
-      if (!Number.isInteger(n) || n < 0 || n > 100000) {
-        setQtyInvalid(true);
-        setError("冊数は0以上の整数で入力してください。");
-        return;
-      }
-    }
-    setQtyInvalid(false);
-    save.mutate({ url: trimmedUrl, memo, items: enteredItems });
-  };
+  const urlInvalidNow = !memoUrlState(url).valid;
+  const hasInputContent =
+    url.trim() !== "" ||
+    memo.trim() !== "" ||
+    Object.values(quantities).some((v) => v.trim() !== "" && Number(v) > 0);
+  const canReset = savedExists || hasInputContent;
 
   // Fixed width on purpose: this class is used only for the
   // per-product count inputs below. It must NOT carry w-full —
   // combined with the row's flex layout, a full-width shrink-0
   // input squeezed the product-name label to zero width (names
   // invisible, stray horizontal scrollbar), the display bug
-  // reported 2026-11-17.
+  // reported 2026-11-17. The width itself is w-14: about half
+  // the earlier w-24, per the user's request (2026-11-17) —
+  // at text-base, 56px still leaves ~38px of content width,
+  // enough for a 3-digit count and the 「冊数」 placeholder
+  // without clipping, and the freed space goes to the
+  // product-name label (flex-1) so names truncate later.
   const numInputCls =
-    "w-24 shrink-0 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-2 py-1.5 text-base text-[var(--text)]";
+    "w-14 shrink-0 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-2 py-1.5 text-base text-[var(--text)]";
 
   return (
     <div>
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <p className="font-ledger text-sm font-bold">{dateLabel(date)}の在庫メモ</p>
+          <p className="font-ledger text-sm font-bold">{dateLabel(date)}のイベントメモ</p>
           {eventName && (
             <p className="mt-0.5 text-sm break-words">{eventName}</p>
           )}
@@ -980,19 +1293,22 @@ function InventoryMemoEditor({
             URL（公式サイトなど）
           </label>
           <input
+            {...FIELDS.saveInventoryMemo.url}
             id={`inv-url-${date}`}
             type="url"
             inputMode="url"
             className={inputCls}
             value={url}
-            aria-invalid={urlInvalid || undefined}
+            aria-invalid={urlInvalidNow || undefined}
             aria-describedby={error ? `inv-error-${date}` : undefined}
             onChange={(e) => setUrl(e.target.value)}
             placeholder="https://…"
           />
-          <p className="mt-1 text-xs text-[var(--dim)]">
-            保存するとリンクとして表示され、タップで開けます。
-          </p>
+          {urlInvalidNow && (
+            <p className="mt-1 text-xs text-[var(--accent)]">
+              URLの形式が正しくないため、このURLはまだ保存されていません（メモ・冊数は自動で保存されます）。
+            </p>
+          )}
         </div>
 
         <div>
@@ -1039,10 +1355,10 @@ function InventoryMemoEditor({
                       {p.product}
                     </label>
                     <input
+                      {...FIELDS.saveInventoryMemo.items.qty}
                       id={`inv-qty-${date}-${p.product}`}
                       type="number"
                       inputMode="numeric"
-                      min={0}
                       className={numInputCls}
                       value={quantities[p.product] ?? ""}
                       aria-invalid={qtyInvalid || undefined}
@@ -1083,6 +1399,7 @@ function InventoryMemoEditor({
             メモ（自由入力）
           </label>
           <textarea
+            {...FIELDS.saveInventoryMemo.memo}
             id={`inv-memo-${date}`}
             className={`${inputCls} min-h-24`}
             value={memo}
@@ -1097,32 +1414,57 @@ function InventoryMemoEditor({
           {error}
         </p>
       )}
-      <div className="mt-3 flex flex-wrap gap-2">
-        <button
-          type="button"
-          disabled={save.isPending}
-          onClick={submit}
-          className="rounded-[var(--radius)] bg-[var(--accent)] px-4 py-2 text-sm font-bold text-white disabled:opacity-50"
-        >
-          {save.isPending ? "保存中…" : "保存する"}
-        </button>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        {confirmingReset ? (
+          <>
+            <span className="text-sm">リセットしますか？</span>
+            <button
+              type="button"
+              onClick={() => void doReset()}
+              className="rounded-[var(--radius)] bg-[var(--accent)] px-3 py-1.5 text-sm font-bold text-white"
+            >
+              リセットする
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirmingReset(false)}
+              className="rounded-[var(--radius)] border border-[var(--border)] px-3 py-1.5 text-sm"
+            >
+              やめる
+            </button>
+          </>
+        ) : (
+          <button
+            type="button"
+            disabled={!canReset}
+            onClick={() => setConfirmingReset(true)}
+            className="rounded-[var(--radius)] border border-[var(--border)] px-3 py-1.5 text-sm disabled:opacity-50"
+          >
+            リセット
+          </button>
+        )}
+        <p role="status" aria-live="polite" className="ml-auto text-xs text-[var(--dim)]">
+          {status === "unsaved" && "未保存の変更があります"}
+          {status === "saving" && "保存中…"}
+          {status === "saved" && "保存しました"}
+          {status === "error" && (
+            <span className="font-medium text-[var(--accent)]">保存できませんでした</span>
+          )}
+        </p>
         <button
           type="button"
           onClick={onClose}
           className="rounded-[var(--radius)] border border-[var(--border)] px-4 py-2 text-sm"
         >
-          キャンセル
+          閉じる
         </button>
       </div>
-      <p className="mt-3 text-xs text-[var(--dim)]">
-        URL・メモ・冊数をすべて空にして保存すると、在庫メモ自体が削除されます。
-      </p>
     </div>
   );
 }
 
 /**
- * Read-only 在庫メモ section inside the day detail: the saved URL as
+ * Read-only イベントメモ section inside the day detail: the saved URL as
  * a tappable link, the per-product counts with their total, and the
  * free memo — plus the edit entry point. Shown for every day,
  * including future event dates with no sales yet.
@@ -1148,6 +1490,36 @@ function InventoryMemoSection({
   const masked = useMasked();
   const [editing, setEditing] = useState(false);
   const [open, setOpen] = useState(() => !hasSales);
+  // Closing the editor dialog goes through the editor's close
+  // guard (registered while the editor is mounted): any unsaved
+  // change is flushed first, and the dialog stays open when the
+  // flush cannot save (or a still-invalid URL would be lost).
+  // Every close path — the editor's 閉じる buttons, the backdrop,
+  // Esc — funnels into requestClose / the Modal's Esc veto.
+  const closeGuardRef = useRef<{
+    flush: () => Promise<boolean>;
+    veto: () => boolean;
+  } | null>(null);
+  const registerCloseGuard = useCallback(
+    (guard: { flush: () => Promise<boolean>; veto: () => boolean } | null) => {
+      closeGuardRef.current = guard;
+    },
+    [],
+  );
+  const requestClose = useCallback(() => {
+    const guard = closeGuardRef.current;
+    if (!guard) {
+      setEditing(false);
+      return;
+    }
+    void guard.flush().then((ok) => {
+      if (ok) setEditing(false);
+    });
+  }, []);
+  const closeVeto = useCallback(
+    () => closeGuardRef.current?.veto() ?? false,
+    [],
+  );
   // Only http/https URLs ever reach storage (enforced on save), but
   // render as a link only when the stored value still parses as one.
   const linkUrl = (() => {
@@ -1162,7 +1534,7 @@ function InventoryMemoSection({
 
   return (
     <section
-      aria-label="在庫メモ"
+      aria-label="イベントメモ"
       className="mt-4 border-t border-dashed border-[var(--border)] pt-3"
     >
       <div className="flex items-center justify-between gap-2">
@@ -1177,7 +1549,7 @@ function InventoryMemoSection({
             <span aria-hidden className="text-xs text-[var(--dim)]">
               {open ? "▼" : "▶"}
             </span>
-            在庫メモ
+            イベントメモ
             <span className="text-xs font-normal text-[var(--dim)]">
               {memo
                 ? memo.items.length > 0
@@ -1192,13 +1564,24 @@ function InventoryMemoSection({
           onClick={() => setEditing(true)}
           className="rounded-[var(--radius)] border border-[var(--border)] px-3 py-1.5 text-xs font-medium"
         >
-          {memo ? "在庫メモを編集" : "在庫メモを追加"}
+          {memo ? "イベントメモを編集" : "イベントメモを追加"}
         </button>
       </div>
       {open && (
-        <div id={`inventory-memo-body-${date}`}>
+        /* The toggle lives ONLY on the heading button above; clicks
+           in the body never open or close the section (stopPropagation
+           is belt-and-braces). The body carries its own generous
+           padding (16px sides / 12px top-bottom) plus a gap from the
+           heading, so the link, table, and text never sit against
+           the section's edges (user report 2026-11-17: tapping near
+           the boundary felt like it closed the frame). */
+        <div
+          id={`inventory-memo-body-${date}`}
+          className={memo ? "mt-2 px-4 py-3" : undefined}
+          onClick={(e) => e.stopPropagation()}
+        >
           {memo ? (
-        <div className="mt-2 grid grid-cols-[minmax(0,1fr)] gap-2 text-sm">
+        <div className="grid grid-cols-[minmax(0,1fr)] gap-2 text-sm">
           {linkUrl && (
             <p>
               <span className="text-xs text-[var(--dim)]">URL：</span>
@@ -1245,18 +1628,20 @@ function InventoryMemoSection({
       )}
       <Modal
         open={editing}
-        onClose={() => setEditing(false)}
+        onClose={requestClose}
+        closeVeto={closeVeto}
         label={
           eventName
-            ? `${dateLabel(date)} ${eventName} の在庫メモ`
-            : `${dateLabel(date)}の在庫メモ`
+            ? `${dateLabel(date)} ${eventName} のイベントメモ`
+            : `${dateLabel(date)}のイベントメモ`
         }
       >
         <InventoryMemoEditor
           date={date}
           eventName={eventName}
           initial={memo}
-          onClose={() => setEditing(false)}
+          onClose={requestClose}
+          registerCloseGuard={registerCloseGuard}
         />
       </Modal>
     </section>
@@ -1321,7 +1706,7 @@ function DayDetailView({ date }: { date: string }) {
         <p className="mt-2 text-sm">
           <FlagBadge />
           <span className="ml-2 text-[var(--dim)]">
-            売り上げは参考情報です（元のデータがきちんと入力できていない可能性があります）
+            売上は参考情報です（元のデータがきちんと入力できていない可能性があります）
           </span>
         </p>
       )}
@@ -1374,7 +1759,7 @@ function DayDetailView({ date }: { date: string }) {
                         {releaseAgeLabel(r.daysSinceRelease)}
                       </span>
                     )}
-                    {r.productSalesUnreliable && <ProductRefBadge label="除外（頒布物）" />}
+                    {r.productSalesUnreliable && <ProductRefBadge label="除外" />}
                     {r.discontinued && <DiscontinuedBadge prominent />}
                     {r.soldOut && <SoldOutBadge />}
                   </span>
@@ -1445,7 +1830,7 @@ function DayDetailView({ date }: { date: string }) {
         {confirmingDelete ? (
           <div>
             <p className="text-sm">
-              {dateLabel(date)}の売上記録（{data.rows.length}頒布物）とイベント登録・フラグ・在庫メモをすべて削除します。この操作は取り消せません。
+              {dateLabel(date)}の売上記録（{data.rows.length}頒布物）とイベント登録・フラグ・イベントメモをすべて削除します。この操作は取り消せません。
             </p>
             {deleteError && (
               <p role="alert" className="mt-2 text-sm text-[var(--accent)]">
@@ -1735,9 +2120,6 @@ export function NewEventSection({ onOpenDay }: { onOpenDay: (date: string) => vo
       >
         ＋ イベントを新規登録
       </button>
-      <p className="mt-1 text-xs text-[var(--dim)]">
-        売上データのない日でも先に登録できます（イベント一覧に「売上なし」と表示されます）。
-      </p>
       <Modal open={open} onClose={() => setOpen(false)} label="イベントを新規登録">
       <div className="flex items-center justify-between gap-2">
         <p className="font-ledger text-sm font-bold">イベントを新規登録</p>

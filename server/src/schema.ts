@@ -109,10 +109,21 @@ export const eventTypes = sqliteTable(
 //                     「500」「100」 or the 『任意の金額』 lump sum).
 //                     The product-level counterpart of
 //                     day_flags.salesUnreliable.
+//   category        — the product's registered category. Category is
+//                     primarily an attribute of the sales rows (every
+//                     row of a product carries it, and views read it
+//                     from there); this column is the fallback store
+//                     for products that have no sales rows yet — a row
+//                     in this table is also what makes a hand-
+//                     registered product （頒布物の新規登録） exist at
+//                     all before its first sale. When a product has
+//                     sales rows, their category wins; setProduct-
+//                     Categories keeps both stores in step.
 export const productReleases = sqliteTable("product_releases", {
   product: text("product").primaryKey(),
   releaseDate: text("release_date").notNull().default(""), // YYYY-MM-DD or ""
   releaseBasis: text("release_basis").notNull().default(""),
+  category: text("category").notNull().default(""),
   // 廃盤 (out of print / no longer brought to events). Never inferred
   // from sales data — the user sets it by hand; default is not set.
   discontinued: integer("discontinued").notNull().default(0), // 0/1
@@ -151,7 +162,7 @@ export const dayFlags = sqliteTable("day_flags", {
 });
 
 // Standard event master list (標準イベント一覧・マスター), seeded once
-// from the prepared events-master.csv (1,233 rows) and replaceable
+// from the prepared events-master.csv (1,305 rows) and replaceable
 // wholesale from the CSV取込 screen. REFERENCE ONLY: these rows are
 // candidates shown in the event registration / edit form and in the
 // unregistered-days check. They are never participation records —
@@ -162,7 +173,7 @@ export const dayFlags = sqliteTable("day_flags", {
 //   note — the source citation from the CSV (「出典:URL」). Shown with
 //          the candidate as provenance; never copied into the event
 //          registration's own note field.
-// Per-date inventory memos （在庫メモ）: what the user plans to send /
+// Per-date inventory memos （イベントメモ）: what the user plans to send /
 // bring to an event on that date. Kept separate from `events` and
 // `sales` — like day_flags — so a memo can be saved for a future
 // event date that has an event registration but no sales yet (the

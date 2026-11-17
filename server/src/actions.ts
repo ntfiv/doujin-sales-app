@@ -103,10 +103,11 @@ const eventTypeValue = z.string().max(100);
 // existing manual settings and automatic results are unchanged.
 // The five added in 2026-11-16 (designfesta / zinefes / comiccity /
 // sunshine / techbook) cover the remaining systems of the standard
-// event master list (events-master.csv, 1,233 rows): classifying
+// event master list (events-master.csv, 1,305 rows): classifying
 // every master event name with this list lands each name in its own
-// system (234 / 361 / 123 / 122 / 80 / 80 / 79 / 50 / 42 / 20, none
-// falls through to その他）. List order is the classification
+// system (238 / 373 / 127 / 130 / 154 / 80 / 83 / 54 / 43 / 22; the
+// one exception is ZINE PARK渋谷 — ZINEフェス's sister brand, whose
+// name carries no type keyword, so it falls through to その他）. List order is the classification
 // priority for the keyword walk; 「その他」 (key "other", no
 // keywords) is the exception — it is LOCKED to the FRONT of the
 // list (pinned in the management UI, undeletable) purely as a
@@ -259,7 +260,7 @@ const daySummaryShape = z.object({
   // in client/src/eventType.ts). Null for unregistered days too.
   eventType: z.string().nullable(),
   salesUnreliable: z.boolean(),
-  // 在庫メモ： true when the date has a saved inventory memo (URL,
+  // イベントメモ： true when the date has a saved inventory memo (URL,
   // per-product sent counts, and/or a free memo). inventoryTotalQty
   // is the sum of the memo's per-product counts (0 when the memo has
   // no counts recorded).
@@ -344,7 +345,7 @@ async function loadDaySummaries(ctx: Ctx): Promise<DaySummary[]> {
 }
 
 // ---------------------------------------------------------------------------
-// Inventory memos （在庫メモ）: per date — one URL, a free memo, and a
+// Inventory memos （イベントメモ）: per date — one URL, a free memo, and a
 // count of copies sent / to bring per product. Stored in their own
 // tables (inventory_memos / inventory_items), independent of the
 // event registration and of sales, so a future event date with no
@@ -380,6 +381,17 @@ async function loadInventoryMemo(
   const items = itemRows
     .filter((r) => r.qty > 0)
     .map((r) => ({ product: r.product, qty: r.qty }));
+  // Display order follows the app-wide product ordering: effective
+  // release date (stored date, or the 2000-01-01 placeholder when
+  // unset), newest first; same-date ties fall back to the name.
+  const releaseMap = await loadReleaseMap(ctx);
+  const effectiveDate = (product: string) =>
+    releaseMap.get(product)?.releaseDate || PLACEHOLDER_RELEASE_DATE;
+  items.sort(
+    (a, b) =>
+      effectiveDate(b.product).localeCompare(effectiveDate(a.product)) ||
+      a.product.localeCompare(b.product, "ja"),
+  );
   return {
     url: m.url,
     memo: m.memo,
@@ -448,6 +460,9 @@ interface ReleaseRow {
   releaseBasis: string;
   discontinued: number;
   salesUnreliable: number;
+  // Registered category — the fallback store used while the product
+  // has no sales rows (sales rows carry the category otherwise).
+  category: string;
 }
 
 async function loadReleaseMap(ctx: Ctx): Promise<Map<string, ReleaseRow>> {
@@ -618,6 +633,42 @@ function resolveAlias(map: Map<string, string>, product: string): string {
   return cur;
 }
 
+/**
+ * Base name normalization for duplicate detection, mirroring the
+ * client search's base normalization (search.ts): NFKC width/case
+ * folding, katakana -> hiragana, and whitespace stripped. Two product
+ * names that differ only in those respects are the same book for
+ * registration purposes — a hand-registered name must not create a
+ * look-alike twin of an existing product.
+ */
+function normalizeProductName(name: string): string {
+  const t = name.normalize("NFKC").toLowerCase().replace(/\s+/g, "");
+  return t.replace(/[ァ-ヶ]/g, (c) =>
+    String.fromCharCode(c.charCodeAt(0) - 0x60),
+  );
+}
+
+/**
+ * Every name that currently identifies a product: products with sales
+ * rows plus products that exist only as a registration (a
+ * product_releases row — the 新規登録 path). 『任意の金額』 is not a
+ * product and is never included.
+ */
+async function loadKnownProductNames(ctx: Ctx): Promise<Set<string>> {
+  const db = ctx.db<typeof schema>();
+  const salesRows = await db
+    .select({ product: schema.sales.product })
+    .from(schema.sales);
+  const releaseRows = await db
+    .select({ product: schema.productReleases.product })
+    .from(schema.productReleases);
+  const names = new Set<string>();
+  for (const r of salesRows) names.add(r.product);
+  for (const r of releaseRows) names.add(r.product);
+  names.delete(LUMP_SUM_PRODUCT);
+  return names;
+}
+
 interface MergeSnapshot {
   sales: {
     date: string;
@@ -637,11 +688,14 @@ interface MergeSnapshot {
     releaseBasis: string;
     discontinued: number;
     salesUnreliable: number;
+    // Registered category. Optional because snapshots written before
+    // the category column existed do not carry it (restored as "").
+    category?: string;
   }[];
   /** Aliases that pointed at a merged-away name and were re-pointed. */
   aliases: { alias: string; canonical: string }[];
   /**
-   * Inventory-memo item rows （在庫メモの冊数） of the involved
+   * Inventory-memo item rows （イベントメモの冊数） of the involved
    * products, so an undo restores them exactly. Optional because
    * snapshots written before inventory memos existed do not carry it.
    */
@@ -777,6 +831,126 @@ export const Actions = {
     },
   }),
 
+  createProduct: defineAction({
+    description:
+      "Registers a brand-new product （頒布物） by hand, before it has any sales: name (required, trimmed), category, release date, 廃盤 and 除外 flags are stored on its product_releases row — that row is the registration record, and its category column holds the category until sales rows exist to carry it. Refused when the name is already taken: an exact (trimmed) match with any existing product (with or without sales), a match that differs only in width / case / kana spelling, a name registered as a merge/rename alias (the error names the product it belongs to — old names are never resurrected as separate products), or the 『任意の金額』 lump-sum entry, which is not a product.",
+    request: z.object({
+      product: z.string().min(1).max(300),
+      category: z.string().max(100),
+      releaseDate: z.string().max(10),
+      discontinued: z.boolean(),
+      salesUnreliable: z.boolean(),
+    }),
+    response: okResponse,
+    handler: async (ctx, args): Promise<z.infer<typeof okResponse>> => {
+      const name = args.product.trim();
+      if (!name) throw new Error("頒布物名を入力してください");
+      if (name === LUMP_SUM_PRODUCT) {
+        throw new Error(
+          "『任意の金額』は頒布物ではないため、登録できません",
+        );
+      }
+      if (args.releaseDate !== "" && !/^\d{4}-\d{2}-\d{2}$/.test(args.releaseDate)) {
+        throw new Error("発行日はYYYY-MM-DD形式で入力してください");
+      }
+      const db = ctx.db<typeof schema>();
+      const known = await loadKnownProductNames(ctx);
+      if (known.has(name)) {
+        throw new Error(`「${name}」は既に登録されています`);
+      }
+      // A merged-away / renamed-away old name belongs to its canonical
+      // product's history — never resurrect it as a separate product.
+      const aliasMap = await loadAliasMap(ctx);
+      if (aliasMap.has(name)) {
+        throw new Error(
+          `「${name}」は「${resolveAlias(aliasMap, name)}」の旧名として登録されているため、新しい頒布物としては登録できません`,
+        );
+      }
+      // Notation variants （全角/半角・大文字小文字・かな表記） of an
+      // existing product or alias would read as a different book in
+      // lists while being the same book in fact — refuse them too.
+      const norm = normalizeProductName(name);
+      for (const existing of known) {
+        if (normalizeProductName(existing) === norm) {
+          throw new Error(
+            `「${existing}」と表記が揺れるだけの名前は登録できません（同じ頒布物として扱われます）`,
+          );
+        }
+      }
+      for (const alias of aliasMap.keys()) {
+        if (normalizeProductName(alias) === norm) {
+          throw new Error(
+            `「${alias}」は「${resolveAlias(aliasMap, alias)}」の旧名として登録されているため、新しい頒布物としては登録できません`,
+          );
+        }
+      }
+      await db.insert(schema.productReleases).values({
+        product: name,
+        releaseDate: args.releaseDate,
+        releaseBasis: "",
+        discontinued: args.discontinued ? 1 : 0,
+        salesUnreliable: args.salesUnreliable ? 1 : 0,
+        category: normalizeCategory(args.category.trim()),
+      });
+      ctx.invalidateQueries();
+      return { ok: true as const };
+    },
+  }),
+
+  deleteProduct: defineAction({
+    description:
+      "Deletes a product's registration — only for products with NO sales rows at all (a hand-registered book that was never sold, or whose sales were never recorded). The product_releases row (release date / category / 廃盤 / 除外） is removed, together with aliases pointing at the product and merge records whose canonical product it is, so no dangling references remain. Refused when the product has any sales rows (use 統合 / 廃盤 for those) or when inventory-memo counts are recorded for it on any date (clear those counts first, so no memo is left pointing at a product that no longer exists).",
+    request: z.object({ product: z.string().min(1).max(300) }),
+    response: okResponse,
+    handler: async (ctx, args): Promise<z.infer<typeof okResponse>> => {
+      const db = ctx.db<typeof schema>();
+      const name = args.product;
+      const salesRows = await db
+        .select({ id: schema.sales.id })
+        .from(schema.sales)
+        .where(eq(schema.sales.product, name));
+      if (salesRows.length > 0) {
+        throw new Error(
+          "売上がある頒布物は削除できません（不要になった本は「廃盤」で扱ってください）",
+        );
+      }
+      const releaseRows = await db
+        .select()
+        .from(schema.productReleases)
+        .where(eq(schema.productReleases.product, name));
+      if (releaseRows.length === 0) {
+        throw new Error("その頒布物は登録されていません");
+      }
+      const invRows = await db
+        .select({ date: schema.inventoryItems.date, qty: schema.inventoryItems.qty })
+        .from(schema.inventoryItems)
+        .where(eq(schema.inventoryItems.product, name));
+      const invWithCounts = invRows.filter((r) => r.qty > 0);
+      if (invWithCounts.length > 0) {
+        throw new Error(
+          `イベントメモに冊数が記録されているため削除できません（${invWithCounts
+            .map((r) => r.date)
+            .join("、")}）。先にイベントメモの冊数を空にしてください`,
+        );
+      }
+      const statements: BatchItem<"sqlite">[] = [
+        db
+          .delete(schema.productReleases)
+          .where(eq(schema.productReleases.product, name)),
+        db
+          .delete(schema.productAliases)
+          .where(eq(schema.productAliases.canonical, name)),
+        db
+          .delete(schema.productMerges)
+          .where(eq(schema.productMerges.canonical, name)),
+      ];
+      const [first, ...rest] = statements;
+      if (first) await db.batch([first, ...rest]);
+      ctx.invalidateQueries();
+      return { ok: true as const };
+    },
+  }),
+
   setDiscontinuedFlags: defineAction({
     description:
       "Bulk-sets the 廃盤 (discontinued) flag on many products at once (from the 廃盤を一括で設定 section): upserts only the discontinued column of each product's release-info row, preserving any release date / basis / 参考情報 flag already stored; safe to run more than once.",
@@ -878,7 +1052,7 @@ export const Actions = {
 
   setProductCategories: defineAction({
     description:
-      "Bulk-sets the category of many products at once (from the 「カテゴリを一括で設定」 section, and for a single product from the unified 頒布物を編集 dialog). Category is an attribute of the sales data itself: every sales row of the product is updated to the given category (an empty string clears it), so all views that read sales rows — product list, day detail, charts — show the same category. Products are addressed by their current (canonical) name; unknown names are ignored.",
+      "Bulk-sets the category of many products at once (from the 「カテゴリを一括で設定」 section, and for a single product from the unified 頒布物を編集 dialog). Category is an attribute of the sales data itself: every sales row of the product is updated to the given category (an empty string clears it), so all views that read sales rows — product list, day detail, charts — show the same category. The same value is also written to the product's registration row (product_releases.category), which is where the category lives for products with no sales rows yet; the two stores are kept in step here. Products are addressed by their current (canonical) name; unknown names are ignored.",
     request: z.object({
       updates: z
         .array(
@@ -893,12 +1067,32 @@ export const Actions = {
     response: z.object({ updated: z.number() }),
     handler: async (ctx, args): Promise<{ updated: number }> => {
       const db = ctx.db<typeof schema>();
-      const statements: BatchItem<"sqlite">[] = args.updates.map((u) =>
-        db
-          .update(schema.sales)
-          .set({ category: u.category.trim() })
-          .where(eq(schema.sales.product, u.product)),
-      );
+      const statements: BatchItem<"sqlite">[] = [];
+      for (const u of args.updates) {
+        const category = normalizeCategory(u.category.trim());
+        statements.push(
+          db
+            .update(schema.sales)
+            .set({ category })
+            .where(eq(schema.sales.product, u.product)),
+        );
+        statements.push(
+          db
+            .insert(schema.productReleases)
+            .values({
+              product: u.product,
+              releaseDate: "",
+              releaseBasis: "",
+              discontinued: 0,
+              salesUnreliable: 0,
+              category,
+            })
+            .onConflictDoUpdate({
+              target: schema.productReleases.product,
+              set: { category },
+            }),
+        );
+      }
       const [first, ...rest] = statements;
       if (first) await db.batch([first, ...rest]);
       ctx.invalidateQueries();
@@ -1135,7 +1329,25 @@ export const Actions = {
       // Merged release info: canonical wins; unset fields inherit from
       // the first source (in the order given) that has them.
       const relOf = (p: string) => releaseRows.find((r) => r.product === p);
+      // A sales-less canonical has no sales rows to express its
+      // category preference in the loop above; its registered category
+      // wins over the sources' sales-row categories, like every other
+      // field.
+      const canonicalRegisteredCategory = relOf(canonical)?.category ?? "";
+      if (
+        canonicalRegisteredCategory &&
+        !salesRows.some((r) => r.product === canonical)
+      ) {
+        for (const v of byDate.values()) v.category = canonicalRegisteredCategory;
+      }
       const cRel = relOf(canonical);
+      // Effective category of a product in this merge: its sales rows'
+      // category when it has sales, otherwise the category registered
+      // on its release row (the only store a sales-less product has).
+      const salesCategoryOf = (p: string) =>
+        salesRows.find((r) => r.product === p && r.category)?.category ?? "";
+      const effectiveCategoryOf = (p: string) =>
+        salesCategoryOf(p) || relOf(p)?.category || "";
       let mergedRelease: MergeSnapshot["releases"][number] | null = null;
       if (cRel || sources.some((s) => relOf(s))) {
         const dateSource = !cRel?.releaseDate
@@ -1161,6 +1373,14 @@ export const Actions = {
             sources.some((s) => (relOf(s)?.salesUnreliable ?? 0) !== 0)
               ? 1
               : 0,
+          // Category follows the canonical-wins rule too, so a merge
+          // whose canonical side is a sales-less registered product
+          // keeps its registered category (and gains one from a source
+          // when the canonical side has none).
+          category:
+            effectiveCategoryOf(canonical) ||
+            sources.map(effectiveCategoryOf).find((c) => c) ||
+            "",
         };
       }
 
@@ -1628,7 +1848,7 @@ export const Actions = {
       ),
       event: eventShape.extend({ eventType: z.string() }).nullable(),
       flags: flagsShape,
-      // 在庫メモ for this date (URL / per-product sent counts / free
+      // イベントメモ for this date (URL / per-product sent counts / free
       // memo), or null when none is saved.
       inventoryMemo: inventoryMemoShape.nullable(),
     }),
@@ -1704,7 +1924,7 @@ export const Actions = {
 
   saveInventoryMemo: defineAction({
     description:
-      "Creates or updates the inventory memo （在庫メモ） for one date: one URL (official site etc.; empty or http/https only), a free-text memo, and per-product counts of copies sent / to bring. Items with qty <= 0 are dropped and duplicate product entries are summed; product names are resolved through the merge alias table like sales imports, and 『任意の金額』 is refused (not a product). The item rows for the date are replaced wholesale. When URL, memo, and items are all empty, the memo is deleted instead, so a stored memo always has content. Works on any date — including a future event date with an event registration but no sales.",
+      "Creates or updates the inventory memo （イベントメモ） for one date: one URL (official site etc.; empty or http/https only), a free-text memo, and per-product counts of copies sent / to bring. Items with qty <= 0 are dropped and duplicate product entries are summed; product names are resolved through the merge alias table like sales imports, and 『任意の金額』 is refused (not a product). The item rows for the date are replaced wholesale. When URL, memo, and items are all empty, the memo is deleted instead, so a stored memo always has content. Works on any date — including a future event date with an event registration but no sales.",
     request: z.object({
       date: dateStr,
       url: z.string().max(2000),
@@ -1742,7 +1962,7 @@ export const Actions = {
         if (item.qty <= 0) continue;
         const product = resolveAlias(aliasMap, item.product);
         if (product === LUMP_SUM_PRODUCT) {
-          throw new Error("『任意の金額』は頒布物ではないため、在庫メモには記録できません");
+          throw new Error("『任意の金額』は頒布物ではないため、イベントメモには記録できません");
         }
         byProduct.set(product, (byProduct.get(product) ?? 0) + item.qty);
       }
@@ -2068,7 +2288,7 @@ export const Actions = {
 
   saveSalesRow: defineAction({
     description:
-      "Adds or updates one manual sales row (date x product) from the in-app sales editor: the product must already be a registered product (one that has sales rows somewhere, or a merged-away alias of one); qty and net are stored as entered, gross mirrors net (no discount split is known for manual entries), and tx is preserved on update / 0 on insert. The row's 完売 (soldOut) flag — that day the copies brought ran out — is stored as given; Square CSV re-imports never overwrite it. Works on dates with no sales and no event registration too. The 『任意の金額』 lump-sum entry is not a product and cannot be added this way (its existing rows can still be edited or deleted).",
+      "Adds or updates one manual sales row (date x product) from the in-app sales editor: the product must already be a registered product — one that has sales rows somewhere, one registered by hand via createProduct (no sales yet), or a merged-away alias of either; qty and net are stored as entered, gross mirrors net (no discount split is known for manual entries), and tx is preserved on update / 0 on insert. A first manual row for a sales-less registered product takes the category registered for it. The row's 完売 (soldOut) flag — that day the copies brought ran out — is stored as given; Square CSV re-imports never overwrite it. Works on dates with no sales and no event registration too. The 『任意の金額』 lump-sum entry is not a product and cannot be added this way (its existing rows can still be edited or deleted).",
     request: z.object({
       date: dateStr,
       product: z.string().min(1).max(300),
@@ -2093,8 +2313,10 @@ export const Actions = {
       const cur = existing[0];
       if (!cur) {
         // New row: only already-registered products may be added —
-        // creating brand-new products from here is out of scope, and
-        // the lump-sum entry is not a product at all.
+        // registered means sales rows somewhere OR a hand registration
+        // (a product_releases row from createProduct). Brand-new
+        // products are created through the 新規登録 form, not here,
+        // and the lump-sum entry is not a product at all.
         if (product === LUMP_SUM_PRODUCT) {
           throw new Error(
             "『任意の金額』は頒布物ではないため、ここからは追加できません",
@@ -2104,10 +2326,17 @@ export const Actions = {
           .select({ category: schema.sales.category })
           .from(schema.sales)
           .where(eq(schema.sales.product, product));
-        if (known.length === 0) {
+        const registered = await db
+          .select({ category: schema.productReleases.category })
+          .from(schema.productReleases)
+          .where(eq(schema.productReleases.product, product));
+        if (known.length === 0 && registered.length === 0) {
           throw new Error("登録済みの頒布物から選んでください");
         }
-        const category = known.find((k) => k.category !== "")?.category ?? "";
+        const category =
+          known.find((k) => k.category !== "")?.category ??
+          registered[0]?.category ??
+          "";
         await db.insert(schema.sales).values({
           date: args.date,
           product,
@@ -2239,6 +2468,82 @@ export const Actions = {
     },
   }),
 
+  importProductSettings: defineAction({
+    description:
+      "Restores product settings from this app's own 頒布物設定 CSV export (product, category, release_date, release_basis, discontinued, sales_unreliable): each row upserts the product's registration row wholesale and rewrites its sales rows' category to the row's category, so a backup restores both sales-less registrations and the settings of products with sales. Names are resolved through the merge alias table like sales imports, so a row written under an old name lands on its canonical product. The 『任意の金額』 lump-sum entry is not a product and its rows are skipped (reported in `skipped`), as are rows with an invalid release date. No sales rows are ever created by this action.",
+    request: z.object({
+      products: z
+        .array(
+          z.object({
+            product: z.string().min(1).max(300),
+            category: z.string().max(100),
+            releaseDate: z.string().max(10),
+            releaseBasis: z.string().max(1000),
+            discontinued: z.boolean(),
+            salesUnreliable: z.boolean(),
+          }),
+        )
+        .max(2000),
+    }),
+    response: z.object({ imported: z.number(), skipped: z.array(z.string()) }),
+    handler: async (
+      ctx,
+      args,
+    ): Promise<{ imported: number; skipped: string[] }> => {
+      const db = ctx.db<typeof schema>();
+      const aliasMap = await loadAliasMap(ctx);
+      const statements: BatchItem<"sqlite">[] = [];
+      const skipped: string[] = [];
+      let imported = 0;
+      for (const row of args.products) {
+        const rawName = row.product.trim();
+        if (!rawName || rawName === LUMP_SUM_PRODUCT) {
+          if (rawName) skipped.push(rawName);
+          continue;
+        }
+        if (row.releaseDate !== "" && !/^\d{4}-\d{2}-\d{2}$/.test(row.releaseDate)) {
+          skipped.push(rawName);
+          continue;
+        }
+        const product = resolveAlias(aliasMap, rawName);
+        const category = normalizeCategory(row.category.trim());
+        statements.push(
+          db
+            .insert(schema.productReleases)
+            .values({
+              product,
+              releaseDate: row.releaseDate,
+              releaseBasis: row.releaseBasis,
+              discontinued: row.discontinued ? 1 : 0,
+              salesUnreliable: row.salesUnreliable ? 1 : 0,
+              category,
+            })
+            .onConflictDoUpdate({
+              target: schema.productReleases.product,
+              set: {
+                releaseDate: row.releaseDate,
+                releaseBasis: row.releaseBasis,
+                discontinued: row.discontinued ? 1 : 0,
+                salesUnreliable: row.salesUnreliable ? 1 : 0,
+                category,
+              },
+            }),
+        );
+        statements.push(
+          db
+            .update(schema.sales)
+            .set({ category })
+            .where(eq(schema.sales.product, product)),
+        );
+        imported += 1;
+      }
+      const [first, ...rest] = statements;
+      if (first) await db.batch([first, ...rest]);
+      ctx.invalidateQueries();
+      return { imported, skipped };
+    },
+  }),
+
   listEvents: defineAction({
     description: "Returns all registered events, by date ascending (used for CSV export).",
     request: z.object({}),
@@ -2252,7 +2557,7 @@ export const Actions = {
 
   getExportData: defineAction({
     description:
-      "Returns everything the user entered, for the データのエクスポート CSV downloads (backup / migration): all sales rows (date x product, net amount and the hand-recorded 完売 flag), all event registrations with their manual event-type override and per-date 「売り上げは参考情報」 flag, and all inventory memos with their per-product sent counts. Read-only. No personal data exists in this ledger, so none is returned.",
+      "Returns everything the user entered, for the データのエクスポート CSV downloads (backup / migration): all sales rows (date x product, net amount and the hand-recorded 完売 flag), all event registrations with their manual event-type override and per-date 「売り上げは参考情報」 flag, all inventory memos with their per-product sent counts, and every product's settings (effective category, release date / basis, 廃盤 and 除外 flags) — including hand-registered products with no sales, whose settings exist nowhere else. The 『任意の金額』 lump-sum entry is not a product and is left out of the product settings. Read-only. No personal data exists in this ledger, so none is returned.",
     request: z.object({}),
     response: z.object({
       sales: z.array(
@@ -2263,6 +2568,16 @@ export const Actions = {
           qty: z.number(),
           net: z.number(),
           soldOut: z.boolean(),
+        }),
+      ),
+      products: z.array(
+        z.object({
+          product: z.string(),
+          category: z.string(),
+          releaseDate: z.string(),
+          releaseBasis: z.string(),
+          discontinued: z.boolean(),
+          salesUnreliable: z.boolean(),
         }),
       ),
       events: z.array(
@@ -2316,7 +2631,40 @@ export const Actions = {
         list.push({ product: r.product, qty: r.qty });
         itemsByDate.set(r.date, list);
       }
+      // Product settings for every product: the union of products
+      // with sales rows and hand-registered products. The category is
+      // the effective one (sales rows first, registration row as
+      // fallback), matching getProducts.
+      const releaseMap = await loadReleaseMap(ctx);
+      const salesCategoryByProduct = new Map<string, string>();
+      for (const r of salesRows) {
+        if (r.category && !salesCategoryByProduct.has(r.product)) {
+          salesCategoryByProduct.set(r.product, r.category);
+        }
+      }
+      const productNames = new Set<string>([
+        ...salesRows.map((r) => r.product),
+        ...releaseMap.keys(),
+      ]);
+      productNames.delete(LUMP_SUM_PRODUCT);
+      const productSettings = [...productNames]
+        .sort((a, b) => a.localeCompare(b, "ja"))
+        .map((product) => {
+          const rel = releaseInfoOf(releaseMap, product);
+          return {
+            product,
+            category:
+              salesCategoryByProduct.get(product) ??
+              releaseMap.get(product)?.category ??
+              "",
+            releaseDate: rel.releaseDate ?? "",
+            releaseBasis: rel.releaseBasis,
+            discontinued: rel.discontinued,
+            salesUnreliable: rel.salesUnreliable,
+          };
+        });
       return {
+        products: productSettings,
         sales: salesRows.map((r) => ({ ...r, soldOut: r.soldOut !== 0 })),
         events: eventRows.map((e) => ({
           date: e.date,
@@ -2340,7 +2688,7 @@ export const Actions = {
 
   resetAllData: defineAction({
     description:
-      "Deletes ALL user-entered data and returns the ledger to its initial state: sales, event registrations, per-date flags, product release info (release dates / 廃盤 / product-level reference flags), product aliases, product merge history, and inventory memos (headers + items). The standard event master list (master_events, reference-only candidates) and the event-type definitions are NOT user-entered records and are kept. Requires confirm: true — the client gates this behind a two-step confirmation dialog.",
+      "Deletes ALL user-entered data and returns the ledger to its initial state: sales, event registrations, per-date flags, product release info (release dates / 廃盤 / product-level reference flags — this table also holds hand-registered products and their categories, so sales-less registrations are wiped too), product aliases, product merge history, and inventory memos (headers + items). The standard event master list (master_events, reference-only candidates) and the event-type definitions are NOT user-entered records and are kept. Requires confirm: true — the client gates this behind a two-step confirmation dialog.",
     request: z.object({ confirm: z.literal(true) }),
     response: z.object({
       sales: z.number(),
@@ -2482,7 +2830,7 @@ export const Actions = {
 
   seedMasterEvents: defineAction({
     description:
-      "One-time seed: inserts the standard event master list (1,233 rows prepared from events-master.csv) into the reference-only master_events table, only when that table is empty. Master rows are candidates for the event form — they are never written into the events (participation) table and never overwrite a user registration; safe to run more than once.",
+      "One-time seed: inserts the standard event master list (1,305 rows prepared from events-master.csv) into the reference-only master_events table, only when that table is empty. Master rows are candidates for the event form — they are never written into the events (participation) table and never overwrite a user registration; safe to run more than once.",
     request: z.object({}),
     response: z.object({ seeded: z.boolean(), rows: z.number() }),
     handler: async (ctx): Promise<{ seeded: boolean; rows: number }> => {
@@ -2542,7 +2890,7 @@ export const Actions = {
 
   replaceMasterEventsFromSeed: defineAction({
     description:
-      "Replaces the standard event master list wholesale with the bundled seed (1,233 rows from the GitHub-published events-master.csv, including the 【中止】 cancelled editions and デザインフェスタ vol.65) — delete-all then insert, in one batch. Used when a revised master CSV has been folded into the seed. Reference-only: the events (participation) table and every count derived from it are untouched.",
+      "Replaces the standard event master list wholesale with the bundled seed (1,305 rows from the GitHub-published events-master.csv v1.1.0, including the 【中止】 cancelled editions, デザインフェスタ vol.65, and the completed ZINEフェス block) — delete-all then insert, in one batch. Used when a revised master CSV has been folded into the seed. Reference-only: the events (participation) table and every count derived from it are untouched.",
     request: z.object({}),
     response: z.object({ replaced: z.number() }),
     handler: async (ctx): Promise<{ replaced: number }> => {
@@ -2725,7 +3073,7 @@ export const Actions = {
 
   getProducts: defineAction({
     description:
-      "Lists every product with lifetime totals and a per-date breakdown joined with event/city info. The 『任意の金額』 lump-sum entry is not a product and is excluded.",
+      "Lists every product with lifetime totals and a per-date breakdown joined with event/city info. Products registered by hand that have no sales yet are included too, with zero totals, an empty breakdown, and empty firstDate / lastDate; their category comes from the registration row (for products with sales, the sales rows' category wins, with the registration row as fallback). The 『任意の金額』 lump-sum entry is not a product and is excluded.",
     request: z.object({}),
     response: z.object({
       products: z.array(
@@ -2846,13 +3194,31 @@ export const Actions = {
           soldOut: r.soldOut !== 0,
         });
       }
+      // Hand-registered products with no sales rows yet: they exist
+      // only as a product_releases row, and join the list with zero
+      // totals and no sales history.
+      for (const [product, rel] of releaseMap) {
+        if (product === LUMP_SUM_PRODUCT || map.has(product)) continue;
+        map.set(product, {
+          product,
+          category: rel.category,
+          qty: 0,
+          net: 0,
+          dates: new Set<string>(),
+          firstDate: "",
+          lastDate: "",
+          byDate: [],
+        });
+      }
       return {
         products: [...map.values()]
           .map((a) => {
             const rel = releaseInfoOf(releaseMap, a.product);
             return {
               product: a.product,
-              category: a.category,
+              // Sales rows carry the category; the registration row is
+              // the fallback (and the only store before any sale).
+              category: a.category || releaseMap.get(a.product)?.category || "",
               qty: a.qty,
               net: a.net,
               dayCount: a.dates.size,
@@ -2862,7 +3228,10 @@ export const Actions = {
               releaseBasis: rel.releaseBasis,
               discontinued: rel.discontinued,
               salesUnreliable: rel.salesUnreliable,
-              totalAppearances: appearances.info(a.product, a.firstDate).totalAppearances,
+              totalAppearances:
+                a.firstDate === ""
+                  ? 0
+                  : appearances.info(a.product, a.firstDate).totalAppearances,
               byDate: a.byDate.sort((x, y) => y.date.localeCompare(x.date)),
             };
           })

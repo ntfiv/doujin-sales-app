@@ -7,6 +7,12 @@ import { matchesQuery } from "./search";
 import { dateLabel, daysBetween, qtyMasked, releaseAgeLabel, yenMasked } from "./format";
 import { useMasked } from "./mask";
 import { useDisplaySettings } from "./display";
+import { actionFields } from "@hatch/space-sdk/fields" with { type: "macro" };
+import type { Actions } from "../../server/src/actions";
+
+// Input limits (maxLength etc.) come from the actions' request
+// schemas, so the form fields and the server can never disagree.
+const FIELDS = actionFields<typeof Actions>();
 
 export type Product = ApiResponse<typeof api, "getProducts">["products"][number];
 
@@ -206,13 +212,13 @@ function ProductEditForm({
                 頒布物名
               </label>
               <input
+                {...FIELDS.renameProduct.newName}
                 id={`${idBase}-name`}
                 className={inputCls}
                 value={newName}
                 aria-invalid={duplicate || undefined}
                 aria-describedby={duplicate ? `${idBase}-duplicate` : undefined}
                 onChange={(e) => setNewName(e.target.value)}
-                maxLength={300}
               />
               {duplicate ? (
                 <p role="alert" id={`${idBase}-duplicate`} className="mt-1 text-sm text-[var(--accent)]">
@@ -229,13 +235,13 @@ function ProductEditForm({
                 カテゴリ（既存のカテゴリから選ぶか、新しい名前を入力。空欄でカテゴリなし）
               </label>
               <input
+                {...FIELDS.setProductCategories.updates.category}
                 id={`${idBase}-category`}
                 className={inputCls}
                 value={category}
                 onChange={(e) => setCategory(e.target.value)}
                 list={`${idBase}-category-options`}
                 placeholder="カテゴリなし"
-                maxLength={100}
               />
               <datalist id={`${idBase}-category-options`}>
                 {categories.map((c) => (
@@ -260,6 +266,7 @@ function ProductEditForm({
                 根拠・メモ（任意）
               </label>
               <input
+                {...FIELDS.saveProductRelease.releaseBasis}
                 id={`${idBase}-basis`}
                 className={inputCls}
                 value={releaseBasis}
@@ -294,14 +301,14 @@ function ProductEditForm({
               <input
                 id={`${idBase}-ref`}
                 type="checkbox"
-                aria-label="除外（頒布物）"
+                aria-label="除外"
                 checked={salesUnreliable}
                 onChange={(e) => setSalesUnreliable(e.target.checked)}
                 className="mt-0.5 h-4 w-4 shrink-0"
                 style={{ accentColor: "var(--accent)" }}
               />
               <span>
-                除外（この頒布物）
+                除外
                 <span className="block text-xs text-[var(--dim)]">
                   記録が正確でない可能性がある頒布物に付けます（価格名で登録されたものなど）。「除外」の印が付き、一覧で非表示にもできます。
                 </span>
@@ -372,6 +379,256 @@ function ProductEditForm({
   );
 }
 
+/**
+ * Base name normalization for the registration form's duplicate
+ * pre-check, mirroring the server's rule (and the client search's
+ * base normalization): NFKC width/case folding, katakana ->
+ * hiragana, whitespace stripped. The server re-checks everything on
+ * save; this only gives immediate feedback while typing.
+ */
+function normalizeNameForCheck(name: string): string {
+  const t = name.normalize("NFKC").toLowerCase().replace(/\s+/g, "");
+  return t.replace(/[ァ-ヶ]/g, (c) =>
+    String.fromCharCode(c.charCodeAt(0) - 0x60),
+  );
+}
+
+/**
+ * 「頒布物を新規登録」 form: registers a new book by hand before it
+ * has any sales (name required; category / release date / 廃盤 /
+ * 除外 optional). Shared by the three entry points — the
+ * 頒布物管理 sub-tab's top section, the 頒布物一覧 tab, and the
+ * sales editor — always inside the shared Modal. On success the
+ * caller hears the registered name via onCreated (the sales editor
+ * selects it for the row being added).
+ */
+export function NewProductForm({
+  onDone,
+  onCreated,
+}: {
+  onDone: () => void;
+  onCreated?: (name: string) => void;
+}) {
+  const queryClient = useQueryClient();
+  const products = useQuery({ queryKey: ["products"], queryFn: () => api.getProducts({}) });
+  const merges = useQuery({
+    queryKey: ["productMerges"],
+    queryFn: () => api.getProductMerges({}),
+  });
+  const [name, setName] = useState("");
+  const [category, setCategory] = useState("");
+  const [releaseDate, setReleaseDate] = useState("");
+  const [discontinued, setDiscontinued] = useState(false);
+  const [salesUnreliable, setSalesUnreliable] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const existingNames = useMemo(
+    () => (products.data?.products ?? []).map((p) => p.product),
+    [products.data],
+  );
+  const categories = useMemo(() => {
+    const set = new Set<string>();
+    for (const p of products.data?.products ?? []) if (p.category) set.add(p.category);
+    return [...set].sort((a, b) => a.localeCompare(b, "ja"));
+  }, [products.data]);
+  const aliases = merges.data?.aliases ?? [];
+
+  const trimmed = name.trim();
+  // Duplicate pre-checks, mirroring the server's refusals.
+  const exactDuplicate = trimmed !== "" && existingNames.includes(trimmed);
+  const aliasHit = trimmed !== "" ? aliases.find((a) => a.alias === trimmed) : undefined;
+  const variantHit =
+    trimmed !== "" && !exactDuplicate && !aliasHit
+      ? (existingNames.find(
+          (n) => normalizeNameForCheck(n) === normalizeNameForCheck(trimmed),
+        ) ??
+        aliases.find(
+          (a) => normalizeNameForCheck(a.alias) === normalizeNameForCheck(trimmed),
+        )?.alias)
+      : undefined;
+  const blocked = exactDuplicate || aliasHit !== undefined || variantHit !== undefined;
+
+  const create = useMutation({
+    mutationFn: async () =>
+      await api.createProduct({
+        product: trimmed,
+        category: category.trim(),
+        releaseDate,
+        discontinued,
+        salesUnreliable,
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["products"] });
+      onCreated?.(trimmed);
+      onDone();
+    },
+    onError: (e) => setError(String(e)),
+  });
+
+  const submit = (ev: FormEvent) => {
+    ev.preventDefault();
+    setError(null);
+    if (!trimmed) {
+      setError("頒布物名を入力してください。");
+      return;
+    }
+    // `blocked` (duplicate / alias / notation variant) already shows
+    // its reason beside the name field above, so there is nothing
+    // more to say here — the save is simply not run.
+    if (blocked) return;
+    create.mutate();
+  };
+
+  const idBase = "new-product";
+  return (
+    <form onSubmit={submit} noValidate>
+      <p className="font-ledger text-sm font-bold">頒布物を新規登録</p>
+      <div className="mt-3 grid grid-cols-[minmax(0,1fr)] gap-3">
+        <div>
+          <label htmlFor={`${idBase}-name`} className={labelCls}>
+            頒布物名（必須）
+          </label>
+          <input
+            {...FIELDS.createProduct.product}
+            id={`${idBase}-name`}
+            className={inputCls}
+            value={name}
+            aria-invalid={blocked || undefined}
+            aria-describedby={blocked ? `${idBase}-duplicate` : undefined}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="例：新しい本のタイトル"
+          />
+          {exactDuplicate ? (
+            <p role="alert" id={`${idBase}-duplicate`} className="mt-1 text-sm text-[var(--accent)]">
+              「{trimmed}」は既に登録されています。
+            </p>
+          ) : aliasHit ? (
+            <p role="alert" id={`${idBase}-duplicate`} className="mt-1 text-sm text-[var(--accent)]">
+              「{trimmed}」は「{aliasHit.canonical}」の旧名として登録されているため、新しい頒布物としては登録できません。
+            </p>
+          ) : variantHit ? (
+            <p role="alert" id={`${idBase}-duplicate`} className="mt-1 text-sm text-[var(--accent)]">
+              「{variantHit}」と表記が揺れるだけの名前は登録できません（同じ頒布物として扱われます）。
+            </p>
+          ) : null}
+        </div>
+        <div>
+          <label htmlFor={`${idBase}-category`} className={labelCls}>
+            カテゴリ（任意。既存のカテゴリから選ぶか、新しい名前を入力。空欄でカテゴリなし）
+          </label>
+          <input
+            {...FIELDS.createProduct.category}
+            id={`${idBase}-category`}
+            className={inputCls}
+            value={category}
+            onChange={(e) => setCategory(e.target.value)}
+            list={`${idBase}-category-options`}
+            placeholder="カテゴリなし"
+          />
+          <datalist id={`${idBase}-category-options`}>
+            {categories.map((c) => (
+              <option key={c} value={c} />
+            ))}
+          </datalist>
+        </div>
+        <div>
+          <label htmlFor={`${idBase}-date`} className={labelCls}>
+            発行日（任意。未設定のままでも登録できます）
+          </label>
+          <input
+            id={`${idBase}-date`}
+            type="date"
+            className={inputCls}
+            value={releaseDate}
+            onChange={(e) => setReleaseDate(e.target.value)}
+          />
+        </div>
+        <label
+          htmlFor={`${idBase}-disc`}
+          className="flex cursor-pointer items-start gap-2 text-sm"
+        >
+          <input
+            id={`${idBase}-disc`}
+            type="checkbox"
+            aria-label="廃盤"
+            checked={discontinued}
+            onChange={(e) => setDiscontinued(e.target.checked)}
+            className="mt-0.5 h-4 w-4 shrink-0"
+            style={{ accentColor: "var(--accent)" }}
+          />
+          <span>
+            廃盤
+            <span className="block text-xs text-[var(--dim)]">
+              廃盤にした本は、一覧や詳細で「廃盤」と表示されます。
+            </span>
+          </span>
+        </label>
+        <label
+          htmlFor={`${idBase}-ref`}
+          className="flex cursor-pointer items-start gap-2 text-sm"
+        >
+          <input
+            id={`${idBase}-ref`}
+            type="checkbox"
+            aria-label="除外"
+            checked={salesUnreliable}
+            onChange={(e) => setSalesUnreliable(e.target.checked)}
+            className="mt-0.5 h-4 w-4 shrink-0"
+            style={{ accentColor: "var(--accent)" }}
+          />
+          <span>
+            除外
+            <span className="block text-xs text-[var(--dim)]">
+              記録が正確でない可能性がある頒布物に付けます。「除外」の印が付き、一覧で非表示にもできます。
+            </span>
+          </span>
+        </label>
+      </div>
+      {error && (
+        <p role="alert" className="mt-2 text-sm text-[var(--accent)]">
+          登録できませんでした：{error}
+        </p>
+      )}
+      <div className="mt-3 flex flex-wrap gap-2">
+        <button
+          type="submit"
+          disabled={!trimmed || blocked || create.isPending}
+          className="rounded-[var(--radius)] bg-[var(--accent)] px-4 py-2 text-sm font-bold text-white disabled:opacity-50"
+        >
+          {create.isPending ? "登録中…" : "登録する"}
+        </button>
+        <button
+          type="button"
+          onClick={onDone}
+          className="rounded-[var(--radius)] border border-[var(--border)] px-4 py-2 text-sm"
+        >
+          キャンセル
+        </button>
+      </div>
+    </form>
+  );
+}
+
+/**
+ * The 新規登録 dialog itself (shared Modal + NewProductForm), for
+ * callers that just need an open flag.
+ */
+export function NewProductDialog({
+  open,
+  onClose,
+  onCreated,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onCreated?: (name: string) => void;
+}) {
+  return (
+    <Modal open={open} onClose={onClose} label="頒布物を新規登録">
+      <NewProductForm onDone={onClose} onCreated={onCreated} />
+    </Modal>
+  );
+}
+
 function ProductDetail({
   product,
   otherNames,
@@ -382,8 +639,25 @@ function ProductDetail({
   categories: string[];
 }) {
   const masked = useMasked();
+  const queryClient = useQueryClient();
   const [editing, setEditing] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const rel = effectiveRelease(product);
+  // A product with no sales rows at all (dayCount 0) exists only as a
+  // registration — it can be deleted (誤登録対策）, unlike products
+  // with sales history.
+  const hasSales = product.dayCount > 0;
+
+  const remove = useMutation({
+    mutationFn: async () => await api.deleteProduct({ product: product.product }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["products"] });
+      void queryClient.invalidateQueries({ queryKey: ["productMerges"] });
+      void queryClient.invalidateQueries({ queryKey: ["overview"] });
+    },
+    onError: (e) => setDeleteError(String(e)),
+  });
 
   return (
     <div className="border-t border-dashed border-[var(--border)] px-4 py-3">
@@ -398,9 +672,16 @@ function ProductDetail({
         ) : (
           <p>
             発行日：未設定（仮: 2000年1月1日）
-            <span className="ml-2 text-xs text-[var(--dim)]">
-              推定：初回販売日 {dateLabel(product.firstDate)}
-            </span>
+            {product.firstDate && (
+              <span className="ml-2 text-xs text-[var(--dim)]">
+                推定：初回販売日 {dateLabel(product.firstDate)}
+              </span>
+            )}
+          </p>
+        )}
+        {!hasSales && (
+          <p className="mt-1 text-xs text-[var(--dim)]">
+            まだ売上が記録されていません。
           </p>
         )}
         {/* 廃盤・参考情報のバッジは一覧の行側にだけ出す。詳細にも出すと
@@ -420,7 +701,49 @@ function ProductDetail({
         >
           頒布物を編集
         </button>
+        {!hasSales &&
+          (confirmDelete ? (
+            <>
+              <span className="flex items-center text-sm text-[var(--accent)]">
+                この頒布物の登録を削除しますか？（発行日・カテゴリ・フラグも消えます）
+              </span>
+              <button
+                type="button"
+                disabled={remove.isPending}
+                onClick={() => {
+                  setDeleteError(null);
+                  remove.mutate();
+                }}
+                className="rounded-[var(--radius)] bg-[var(--accent)] px-4 py-2 text-sm font-bold text-white disabled:opacity-50"
+              >
+                {remove.isPending ? "削除中…" : "削除する"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirmDelete(false)}
+                className="rounded-[var(--radius)] border border-[var(--border)] px-4 py-2 text-sm"
+              >
+                やめる
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              onClick={() => {
+                setDeleteError(null);
+                setConfirmDelete(true);
+              }}
+              className="rounded-[var(--radius)] border border-[var(--border)] px-4 py-2 text-sm font-medium text-[var(--accent)]"
+            >
+              登録を削除
+            </button>
+          ))}
       </div>
+      {deleteError && (
+        <p role="alert" className="mt-2 text-sm text-[var(--accent)]">
+          削除できませんでした：{deleteError}
+        </p>
+      )}
       <Modal
         open={editing}
         onClose={() => setEditing(false)}
@@ -434,6 +757,7 @@ function ProductDetail({
         />
       </Modal>
 
+      {product.byDate.length > 0 && (
       <table className="mt-3 w-full text-sm">
         <thead>
           <tr className="border-b border-[var(--border)] text-left text-xs text-[var(--dim)]">
@@ -483,6 +807,7 @@ function ProductDetail({
           })}
         </tbody>
       </table>
+      )}
     </div>
   );
 }
@@ -523,6 +848,7 @@ export function ProductsView() {
   const [hideRef, setHideRef] = useState(true);
   const [hideDiscontinued, setHideDiscontinued] = useState(false);
   const [open, setOpen] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
   const [mergeMode, setMergeMode] = useState(false);
   const [selected, setSelected] = useState<string[]>([]);
   const [canonical, setCanonical] = useState("");
@@ -600,8 +926,10 @@ export function ProductsView() {
         (!hideDiscontinued || !p.discontinued),
     );
     // 発行順 uses the effective release date: the stored date when set,
-    // otherwise the 2000-01-01 placeholder (仮日付) — the same
-    // rule the detail view uses. Ties fall back to copies sold.
+    // otherwise the 2000-01-01 placeholder (仮日付) — the app-wide
+    // rule (byReleaseDateDesc): same-date ties fall back to the
+    // product name. 冊数順 / 売上順 keep copies sold as their
+    // tie-break.
     const byQty = (a: Product, b: Product) => b.qty - a.qty;
     const sorted = [...list];
     switch (sort) {
@@ -612,17 +940,13 @@ export function ProductsView() {
         sorted.sort((a, b) => b.net - a.net || byQty(a, b));
         break;
       case "releaseDesc":
-        sorted.sort(
-          (a, b) =>
-            effectiveRelease(b).date.localeCompare(effectiveRelease(a).date) ||
-            byQty(a, b),
-        );
+        sorted.sort(byReleaseDateDesc);
         break;
       case "releaseAsc":
         sorted.sort(
           (a, b) =>
             effectiveRelease(a).date.localeCompare(effectiveRelease(b).date) ||
-            byQty(a, b),
+            a.product.localeCompare(b.product, "ja"),
         );
         break;
       case "name":
@@ -713,6 +1037,13 @@ export function ProductsView() {
         <div className="ml-auto flex flex-wrap gap-2">
           <button
             type="button"
+            onClick={() => setCreating(true)}
+            className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-sm font-medium"
+          >
+            新しい頒布物を登録
+          </button>
+          <button
+            type="button"
             aria-pressed={mergeMode}
             onClick={() => (mergeMode ? exitMergeMode() : setMergeMode(true))}
             className={`rounded-[var(--radius)] border px-3 py-1.5 text-sm font-medium ${
@@ -725,6 +1056,11 @@ export function ProductsView() {
           </button>
         </div>
       </div>
+      <NewProductDialog
+        open={creating}
+        onClose={() => setCreating(false)}
+        onCreated={(name) => setOpen(name)}
+      />
       <p className="mt-1 text-xs text-[var(--dim)]">
         一括設定・統合・対応表は、データ管理タブの「頒布物管理」にあります。
       </p>
@@ -735,9 +1071,6 @@ export function ProductsView() {
           className="mt-2 rounded-[var(--radius)] border border-[var(--accent)] bg-[var(--surface)] p-4"
         >
           <h2 className="font-ledger text-base font-bold">頒布物の統合</h2>
-          <p className="mt-1 text-sm text-[var(--dim)]">
-            同じ本が複数の名前で登録されている場合に、1つの名前にまとめます。統合したい頒布物を2つ以上選び、残す名前（統合先）を決めてください。売上は統合先に寄り、同日の重複は合算されます。今後のCSV取込でも旧名は自動で統合先に寄ります。取り消しは後からできます。
-          </p>
           {candidateGroups.length > 0 && (
             <div className="mt-3">
               <p className="text-xs font-medium text-[var(--dim)]">
@@ -778,9 +1111,9 @@ export function ProductsView() {
                     setConfirming(false);
                   }}
                 >
-                  {selected.map((n) => (
-                    <option key={n} value={n}>
-                      {n}
+                  {[...selectedProducts].sort(byReleaseDateDesc).map((p) => (
+                    <option key={p.product} value={p.product}>
+                      {p.product}
                     </option>
                   ))}
                 </select>
@@ -791,9 +1124,6 @@ export function ProductsView() {
                   ▼
                 </span>
               </div>
-              <p className="mt-1 text-xs text-[var(--dim)]">
-                発行日は統合先の値が優先され、統合先で未設定の項目は統合元から引き継がれます。廃盤・除外は、いずれかの頒布物に付いていれば統合後も引き継がれます。
-              </p>
             </div>
           )}
           {selected.length >= 2 && !confirming && (
@@ -814,15 +1144,13 @@ export function ProductsView() {
                 <span className="font-bold">{canonical}</span> に、
                 {selected.filter((n) => n !== canonical).join("、")} を統合します。
               </p>
-              <ul className="mt-1 list-disc pl-5 text-[var(--dim)]">
-                <li>
-                  売上記録 {selectedProducts.reduce((s, p) => s + p.byDate.length, 0)}
-                  件（合計 {qtyMasked(selectedProducts.reduce((s, p) => s + p.qty, 0), masked)}冊）が
-                  {canonical} に寄ります。同日の重複は合算されます。
-                </li>
-                <li>旧名は対応表に残り、今後のCSV取込でも自動で{canonical}に寄ります。</li>
-                <li>統合はデータ管理タブ「頒布物管理」の「頒布物名の対応・統合履歴」から取り消せます。</li>
-              </ul>
+              <p className="tnum mt-1 text-[var(--dim)]">
+                対象の売上記録 {selectedProducts.reduce((s, p) => s + p.byDate.length, 0)}
+                件（合計 {qtyMasked(selectedProducts.reduce((s, p) => s + p.qty, 0), masked)}冊）
+              </p>
+              <p className="mt-1 text-[var(--dim)]">
+                統合すると、売上は統合先に寄り、同日の重複は合算されます。今後のCSV取込でも旧名は自動で統合先に寄ります。発行日・廃盤・除外は統合先が優先され、未設定の分は統合元から引き継ぎます。統合はあとから取り消せます。
+              </p>
               {mergeError && (
                 <p role="alert" className="mt-2 text-sm text-[var(--accent)]">
                   統合できませんでした：{mergeError}

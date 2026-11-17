@@ -6,6 +6,7 @@ import { dateLabel, qtyMasked } from "./format";
 import { useMasked } from "./mask";
 import {
 DiscontinuedBadge,
+NewProductDialog,
 ProductRefBadge,
 byReleaseDateDesc,
 inputCls,
@@ -13,6 +14,12 @@ labelCls,
 MERGE_CANDIDATE_GROUPS,
 type Product,
 } from "./Products";
+import { actionFields } from "@hatch/space-sdk/fields" with { type: "macro" };
+import type { Actions } from "../../server/src/actions";
+
+// Input limits come from the actions' request schemas, so the form
+// fields and the server can never disagree.
+const FIELDS = actionFields<typeof Actions>();
 
 /**
  * 頒布物の管理系セクション（発行日を一括で設定・カテゴリを一括で設定・
@@ -35,7 +42,39 @@ const isCategoryUnset = (value: string) => {
 };
 
 /**
- * 「発行日を一括で設定」: the topmost 頒布物管理 section. Same
+ * 「頒布物を新規登録」: the topmost 頒布物管理 section. A single
+ * button opening the shared 新規登録 dialog (Products.tsx
+ * NewProductForm) — the same form the 頒布物一覧 tab and the sales
+ * editor use. Registered products appear in every list below (and
+ * in 頒布物一覧・イベントメモ） even before they have any sales.
+ */
+function NewProductSection() {
+  const [creating, setCreating] = useState(false);
+  return (
+    <section
+      aria-label="頒布物を新規登録"
+      className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] p-4"
+    >
+      <h2 className="font-ledger text-base font-bold">頒布物を新規登録</h2>
+      <p className="mt-1 text-sm text-[var(--dim)]">
+        CSVからの取り込みがメインの使い方ですが、イベント前に新刊を登録することで事前にイベントメモで活用することもできます。
+      </p>
+      <div className="mt-3">
+        <button
+          type="button"
+          onClick={() => setCreating(true)}
+          className="rounded-[var(--radius)] bg-[var(--accent)] px-4 py-2 text-sm font-bold text-white"
+        >
+          新しい頒布物を登録
+        </button>
+      </div>
+      <NewProductDialog open={creating} onClose={() => setCreating(false)} />
+    </section>
+  );
+}
+
+/**
+ * 「発行日を一括で設定」: the second 頒布物管理 section. Same
  * checkbox-list shape as 「廃盤を一括で設定」: every product gets a
  * checkbox plus its current 発行日 (未設定 when unset) and its 初頒布日
  * (firstDate — the first day it was sold). Pressing 「初頒布日を取得
@@ -43,10 +82,9 @@ const isCategoryUnset = (value: string) => {
  * to its first sales date via setReleaseDatesFromFirstSales (already-
  * set dates are overwritten). Unlike the draft-based sections there is
  * nothing to stage here — the value comes from the sales data itself,
- * so the button applies at once. Products with no sales rows have no
- * first sales date: their checkbox is disabled and the row says so.
- * (getProducts builds the list from sales rows, so in practice every
- * listed product has sales; the guard covers the shape regardless.)
+ * so the button applies at once. Products with no sales rows
+ * (hand-registered ones) have no first sales date: their checkbox is
+ * disabled and the row says so （売上がないため対象外）.
  */
 function ReleaseDateSection({ allProducts }: { allProducts: Product[] }) {
   const queryClient = useQueryClient();
@@ -95,7 +133,7 @@ function ReleaseDateSection({ allProducts }: { allProducts: Product[] }) {
   return (
     <section
       aria-label="発行日を一括で設定"
-      className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] p-4"
+      className="mt-5 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] p-4"
     >
       <h2 className="font-ledger text-base font-bold">発行日を一括で設定</h2>
       <p className="mt-1 text-sm text-[var(--dim)]">
@@ -321,6 +359,7 @@ function CategorySection({ allProducts }: { allProducts: Product[] }) {
         </label>
         <div className="flex flex-wrap gap-2">
           <input
+            {...FIELDS.setProductCategories.updates.category}
             id="cat-bulk-fill"
             className={`${inputCls} min-w-40 flex-1`}
             value={bulkCategory}
@@ -393,6 +432,7 @@ function CategorySection({ allProducts }: { allProducts: Product[] }) {
                 <span className="text-xs font-bold text-[var(--accent)]">変更あり</span>
               )}
               <input
+                {...FIELDS.setProductCategories.updates.category}
                 aria-label={`${p.product}のカテゴリ`}
                 className="w-40 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-2 py-1.5 text-sm"
                 value={value}
@@ -631,8 +671,9 @@ function DiscontinuedSection({ allProducts }: { allProducts: Product[] }) {
 /**
  * 「同じ本を一括で統合」: checkbox multi-select + canonical picker that runs
  * the same mergeProducts action as the list's 統合 mode (same-day sums,
- * old names become aliases, undoable from the history below). Lives
- * directly above 「頒布物名の対応・統合履歴」.
+ * old names become aliases, undoable from the history below). The
+ * 「頒布物名の対応・統合履歴」 block (MergeManagement) is rendered at
+ * the bottom of this same frame, below the merge controls.
  */
 function BulkMergeSection({
   allProducts,
@@ -705,9 +746,6 @@ function BulkMergeSection({
       className="mt-5 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] p-4"
     >
       <h2 className="font-ledger text-base font-bold">同じ本を一括で統合</h2>
-      <p className="mt-1 text-sm text-[var(--dim)]">
-        同じ本が複数の名前で登録されている場合に、選んだ頒布物を1つの名前にまとめます。売上は統合先に寄り、同日の重複は合算されます。今後のCSV取込でも旧名は自動で統合先に寄ります。取り消しは下の「頒布物名の対応・統合履歴」から（頒布物一覧の「頒布物を統合」でも同じ統合ができます）。
-      </p>
 
       {candidateGroups.length > 0 && (
         <div className="mt-3">
@@ -795,9 +833,9 @@ function BulkMergeSection({
                 setConfirming(false);
               }}
             >
-              {selected.map((n) => (
-                <option key={n} value={n}>
-                  {n}
+              {[...selectedProducts].sort(byReleaseDateDesc).map((p) => (
+                <option key={p.product} value={p.product}>
+                  {p.product}
                 </option>
               ))}
             </select>
@@ -808,9 +846,6 @@ function BulkMergeSection({
               ▼
             </span>
           </div>
-          <p className="mt-1 text-xs text-[var(--dim)]">
-            発行日は統合先の値が優先され、統合先で未設定の項目は統合元から引き継がれます。廃盤・除外は、いずれかの頒布物に付いていれば統合後も引き継がれます。
-          </p>
         </div>
       )}
 
@@ -832,15 +867,13 @@ function BulkMergeSection({
             <span className="font-bold">{canonical}</span> に、
             {selected.filter((n) => n !== canonical).join("、")} を統合します。
           </p>
-          <ul className="mt-1 list-disc pl-5 text-[var(--dim)]">
-            <li>
-              売上記録 {selectedProducts.reduce((s, p) => s + p.byDate.length, 0)}
-              件（合計 {qtyMasked(selectedProducts.reduce((s, p) => s + p.qty, 0), masked)}冊）が
-              {canonical} に寄ります。同日の重複は合算されます。
-            </li>
-            <li>旧名は対応表に残り、今後のCSV取込でも自動で{canonical}に寄ります。</li>
-            <li>統合は下の「頒布物名の対応・統合履歴」から取り消せます。</li>
-          </ul>
+          <p className="tnum mt-1 text-[var(--dim)]">
+            対象の売上記録 {selectedProducts.reduce((s, p) => s + p.byDate.length, 0)}
+            件（合計 {qtyMasked(selectedProducts.reduce((s, p) => s + p.qty, 0), masked)}冊）
+          </p>
+          <p className="mt-1 text-[var(--dim)]">
+            統合すると、売上は統合先に寄り、同日の重複は合算されます。今後のCSV取込でも旧名は自動で統合先に寄ります。発行日・廃盤・除外は統合先が優先され、未設定の分は統合元から引き継ぎます。統合はあとから取り消せます。
+          </p>
           {error && (
             <p role="alert" className="mt-2 text-sm text-[var(--accent)]">
               統合できませんでした：{error}
@@ -879,10 +912,25 @@ function BulkMergeSection({
           選択をクリア
         </button>
       )}
+
+      {/* 頒布物名の対応・統合履歴 lives at the bottom of this frame,
+          separated from the merge controls by a divider line. It
+          renders nothing while there are no aliases and no merge
+          history. */}
+      <MergeManagement />
     </section>
   );
 }
 
+/**
+ * 「頒布物名の対応・統合履歴」: the alias list (旧名 → 統合先・変更後）
+ * and the undoable merge history. Rendered inside the 「同じ本を
+ * 一括で統合」 frame (BulkMergeSection), below the merge controls
+ * and separated from them by a divider line — it is no longer a
+ * frame of its own. The alias list and merge history can grow long,
+ * so the block stays collapsible and starts closed, as before.
+ * Renders nothing while there are no aliases and no merge history.
+ */
 function MergeManagement() {
   const queryClient = useQueryClient();
   const merges = useQuery({
@@ -892,7 +940,7 @@ function MergeManagement() {
   const [confirmUndoId, setConfirmUndoId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   // The alias list and merge history can grow long, so the whole
-  // section is collapsible and starts closed.
+  // block is collapsible and starts closed.
   const [open, setOpen] = useState(false);
 
   const undo = useMutation({
@@ -914,7 +962,7 @@ function MergeManagement() {
   return (
     <section
       aria-label="頒布物名の対応と統合履歴"
-      className="mt-5 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] p-4"
+      className="mt-5 border-t border-[var(--border)] pt-4"
     >
       <button
         type="button"
@@ -1011,9 +1059,10 @@ function MergeManagement() {
 }
 
 /**
- * The management sections, in order: 発行日を一括で設定 →
- * カテゴリを一括で設定 → 廃盤を一括で設定 → 同じ本を一括で統合 →
- * 頒布物名の対応・統合履歴.
+ * The management sections, in order: 頒布物を新規登録 →
+ * 発行日を一括で設定 → カテゴリを一括で設定 → 廃盤を一括で設定 →
+ * 同じ本を一括で統合 （頒布物名の対応・統合履歴 is inside that last
+ * frame, at its bottom — see MergeManagement).
  * Rendered in the データ管理 tab's 「頒布物管理」 sub-tab (App).
  */
 export function ProductAdminSections() {
@@ -1043,11 +1092,11 @@ export function ProductAdminSections() {
 
   return (
     <>
+      <NewProductSection />
       <ReleaseDateSection allProducts={allProducts} />
       <CategorySection allProducts={allProducts} />
       <DiscontinuedSection allProducts={allProducts} />
       <BulkMergeSection allProducts={allProducts} candidateGroups={candidateGroups} />
-      <MergeManagement />
     </>
   );
 }

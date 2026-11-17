@@ -1,5 +1,6 @@
 import { useRef, useState, type ChangeEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { unzipSync } from "fflate";
 import { api } from "./api";
 import {
 decodeCsvBuffer,
@@ -7,15 +8,19 @@ downloadTextFile,
 eventsToCsv,
 inventoryMemosToCsv,
 isManualCsv,
+isProductSettingsCsv,
 isSokubaiCsv,
 manualSalesTemplateCsv,
 parseEventCsv,
 parseManualCsv,
+parseProductSettingsCsv,
 parseSokubaiCsv,
 parseSquareCsv,
+productsToCsv,
 salesToManualCsv,
 type EventRow,
 type ManualParseResult,
+type SaleAggregate,
 } from "./csv";
 import { qtyMasked, yenMasked } from "./format";
 import { useMask } from "./mask";
@@ -137,8 +142,9 @@ export function DisplaySettingsSection() {
  * 設定ビュー: 使用するCSV取り込み — checkboxes choosing which of
  * the three sales-CSV import sections the CSV取込 view shows.
  * Display-only and stored on-device via DisplaySettingsProvider
- * (display.tsx); all three default to shown. The 標準イベント一覧
- * section is not part of the choice and always shows.
+ * (display.tsx); all three default to shown. The イベント登録CSV
+ * section （イベント管理） and the 標準イベント一覧 section
+ * （総合管理） are not part of the choice and always show.
  */
 export function CsvImportSettingsSection() {
   const {
@@ -180,7 +186,7 @@ export function CsvImportSettingsSection() {
         使用するCSV取り込み
       </h2>
       <p className="mt-1 text-sm text-[var(--dim)]">
-        CSV取込画面に表示する取り込みの種類を選びます。チェックを外した取り込みは画面に出なくなります（表示だけの設定で、取り込み済みのデータには影響しません）。設定はこの端末に保存されます。標準イベント一覧の差し替えは常時表示されます。
+        CSV取込画面に表示する取り込みの種類を選びます。チェックを外した取り込みは画面に出なくなります（表示だけの設定で、取り込み済みのデータには影響しません）。設定はこの端末に保存されます。標準イベント一覧の差し替えはデータ管理の「総合管理」にあります。
       </p>
       {items.map((item) => (
         <label
@@ -205,40 +211,48 @@ export function CsvImportSettingsSection() {
 }
 
 /**
- * CSV取込ビュー: Square, 即売レジ and 手記録 sales CSV import,
- * event-registration CSV import/export, and the note on what this
- * ledger stores.
+ * 売上を取り込むビュー: Square, 即売レジ and 手記録 sales CSV
+ * import, 頒布物設定 CSV import, and the note on what this ledger
+ * stores. （イベント登録CSVの取り込みは データ管理＞イベント管理
+ * へ、標準イベント一覧の差し替えは データ管理＞総合管理 へ移設。)
  */
-export function CsvImportView() {
+export function CsvImportView({
+  onOpenExport,
+}: {
+  /** Jump to データ管理＞総合管理's データのエクスポート section. */
+  onOpenExport: () => void;
+}) {
   const queryClient = useQueryClient();
   const { masked } = useMask();
   const { showSquareImport, showSokubaiImport, showManualImport } = useDisplaySettings();
   const squareRef = useRef<HTMLInputElement>(null);
   const sokubaiRef = useRef<HTMLInputElement>(null);
   const manualRef = useRef<HTMLInputElement>(null);
-  const eventRef = useRef<HTMLInputElement>(null);
-  const masterRef = useRef<HTMLInputElement>(null);
+  const productSettingsRef = useRef<HTMLInputElement>(null);
   const [squareMsg, setSquareMsg] = useState<string | null>(null);
   const [squareErr, setSquareErr] = useState<string | null>(null);
   const [sokubaiMsg, setSokubaiMsg] = useState<string | null>(null);
   const [sokubaiErr, setSokubaiErr] = useState<string | null>(null);
+  // 一括取り込み（ZIP / 複数ファイル）のプレビュー待ちデータ。
+  // ok = 取り込み対象ファイル（ファイルごとの集計済み行を保持）、
+  // ng = 除外されたファイルとその理由。単一CSVの従来フローでは
+  // 使わない（即時取り込みのまま）。
+  const [sokubaiPending, setSokubaiPending] = useState<{
+    ok: {
+      name: string;
+      dates: string[];
+      qty: number;
+      total: number;
+      rows: SaleAggregate[];
+    }[];
+    ng: { name: string; reason: string }[];
+  } | null>(null);
   const [manualMsg, setManualMsg] = useState<string | null>(null);
   const [manualErr, setManualErr] = useState<string | null>(null);
   // Parsed 手記録CSV waiting for the preview confirmation.
   const [manualPending, setManualPending] = useState<ManualParseResult | null>(null);
-  const [eventMsg, setEventMsg] = useState<string | null>(null);
-  const [eventErr, setEventErr] = useState<string | null>(null);
-  const [exportErr, setExportErr] = useState<string | null>(null);
-  const [masterMsg, setMasterMsg] = useState<string | null>(null);
-  const [masterErr, setMasterErr] = useState<string | null>(null);
-  // Parsed master CSV waiting for the replace confirmation.
-  const [masterPending, setMasterPending] = useState<EventRow[] | null>(null);
-
-  const masterQuery = useQuery({
-    queryKey: ["masterEvents"],
-    queryFn: () => api.getMasterEvents({}),
-  });
-  const masterCount = masterQuery.data?.events.length ?? null;
+  const [productSettingsMsg, setProductSettingsMsg] = useState<string | null>(null);
+  const [productSettingsErr, setProductSettingsErr] = useState<string | null>(null);
 
   const importSales = useMutation({
     mutationFn: async (rows: Parameters<typeof api.importSales>[0]["rows"]) =>
@@ -260,6 +274,7 @@ export function CsvImportView() {
       await api.importSales({ rows }),
     onSuccess: (res) => {
       invalidateAll(queryClient);
+      setSokubaiPending(null);
       setSokubaiMsg(
         `${res.dates}日分・${res.imported}件の頒布物別集計を取り込みました（同じ日付・頒布物は新しい内容で置き換え）。`,
       );
@@ -283,15 +298,40 @@ export function CsvImportView() {
     onError: (e) => setManualErr(`取り込みに失敗しました：${String(e)}`),
   });
 
-  const importEvents = useMutation({
-    mutationFn: async (events: Parameters<typeof api.importEvents>[0]["events"]) =>
-      await api.importEvents({ events }),
+  const importProductSettings = useMutation({
+    mutationFn: async (
+      products: Parameters<typeof api.importProductSettings>[0]["products"],
+    ) => await api.importProductSettings({ products }),
     onSuccess: (res) => {
       invalidateAll(queryClient);
-      setEventMsg(`${res.imported}件のイベント登録を取り込みました。`);
+      setProductSettingsMsg(
+        `${res.imported}件の頒布物設定を取り込みました。` +
+          (res.skipped.length > 0
+            ? `（取り込めなかった行：${res.skipped.join("、")}）`
+            : ""),
+      );
     },
-    onError: (e) => setEventErr(`取り込みに失敗しました：${String(e)}`),
+    onError: (e) => setProductSettingsErr(`取り込みに失敗しました：${String(e)}`),
   });
+
+  const onProductSettingsFile = async (ev: ChangeEvent<HTMLInputElement>) => {
+    const file = ev.target.files?.[0];
+    ev.target.value = "";
+    if (!file) return;
+    setProductSettingsMsg(null);
+    setProductSettingsErr(null);
+    try {
+      const text = decodeCsvBuffer(await file.arrayBuffer());
+      const rows = parseProductSettingsCsv(text);
+      if (rows.length === 0) {
+        setProductSettingsErr("取り込める頒布物設定がありませんでした。");
+        return;
+      }
+      importProductSettings.mutate(rows);
+    } catch (e) {
+      setProductSettingsErr(e instanceof Error ? e.message : String(e));
+    }
+  };
 
   const onSquareFile = async (ev: ChangeEvent<HTMLInputElement>) => {
     const file = ev.target.files?.[0];
@@ -301,6 +341,12 @@ export function CsvImportView() {
     setSquareErr(null);
     try {
       const text = decodeCsvBuffer(await file.arrayBuffer());
+      if (isProductSettingsCsv(text)) {
+        setSquareErr(
+          "このファイルは頒布物設定のCSVのようです。下の「頒布物設定CSVを取り込む」から取り込んでください。",
+        );
+        return;
+      }
       if (isSokubaiCsv(text)) {
         setSquareErr(
           showSokubaiImport
@@ -333,24 +379,115 @@ export function CsvImportView() {
   };
 
   const onSokubaiFile = async (ev: ChangeEvent<HTMLInputElement>) => {
-    const file = ev.target.files?.[0];
+    const files = ev.target.files ? Array.from(ev.target.files) : [];
     ev.target.value = "";
-    if (!file) return;
+    if (files.length === 0) return;
     setSokubaiMsg(null);
     setSokubaiErr(null);
+    setSokubaiPending(null);
     try {
-      const text = decodeCsvBuffer(await file.arrayBuffer());
-      const { rows, transactions } = parseSokubaiCsv(text);
-      if (rows.length === 0) {
-        setSokubaiErr("取り込める売上行がありませんでした。");
+      // ZIPが混ざっているか、複数ファイルが選ばれたら一括フロー
+      // （プレビュー確認つき）。単一CSVだけのときは従来どおり
+      // 即時取り込み。
+      const isBatch =
+        files.length > 1 || files.some((f) => /\.zip$/i.test(f.name));
+      if (!isBatch) {
+        const file = files[0];
+        if (!file) return;
+        const text = decodeCsvBuffer(await file.arrayBuffer());
+        const { rows, transactions } = parseSokubaiCsv(text);
+        if (rows.length === 0) {
+          setSokubaiErr("取り込める売上行がありませんでした。");
+          return;
+        }
+        const totalQty = rows.reduce((s, r) => s + r.qty, 0);
+        const total = rows.reduce((s, r) => s + r.net, 0);
+        setSokubaiMsg(
+          `「${file.name}」を読み取りました：${transactions}件の取引・${rows.length}件の集計（${totalQty}冊・売上 ${yenMasked(total, masked)}）。取り込み中…`,
+        );
+        importSokubai.mutate(rows);
         return;
       }
-      const totalQty = rows.reduce((s, r) => s + r.qty, 0);
-      const total = rows.reduce((s, r) => s + r.net, 0);
-      setSokubaiMsg(
-        `「${file.name}」を読み取りました：${transactions}件の取引・${rows.length}件の集計（${totalQty}冊・売上 ${yenMasked(total, masked)}）。取り込み中…`,
-      );
-      importSokubai.mutate(rows);
+
+      // 一括フロー: ZIPはこの端末内で解凍し（外部送信なし）、中の
+      // .csv だけを対象にする（サブフォルダ内も含む。フォルダ・
+      // __MACOSX・隠しファイル・CSV以外は無視）。
+      const entries: { name: string; buf: ArrayBuffer }[] = [];
+      for (const f of files) {
+        if (/\.zip$/i.test(f.name)) {
+          let unzipped: Record<string, Uint8Array>;
+          try {
+            unzipped = unzipSync(new Uint8Array(await f.arrayBuffer()));
+          } catch {
+            setSokubaiErr(`ZIPファイル「${f.name}」を開けませんでした。`);
+            return;
+          }
+          for (const [path, data] of Object.entries(unzipped)) {
+            if (path.endsWith("/")) continue;
+            const parts = path.split("/");
+            if (parts.includes("__MACOSX")) continue;
+            const base = parts[parts.length - 1] ?? path;
+            if (base.startsWith(".")) continue;
+            if (!/\.csv$/i.test(base)) continue;
+            const buf = new ArrayBuffer(data.byteLength);
+            new Uint8Array(buf).set(data);
+            entries.push({ name: base, buf });
+          }
+        } else {
+          entries.push({ name: f.name, buf: await f.arrayBuffer() });
+        }
+      }
+      if (entries.length === 0) {
+        setSokubaiErr("取り込めるCSVファイルが入っていませんでした。");
+        return;
+      }
+
+      // ファイルごとに既存の解析・検証を通す。不正なファイルは
+      // そのファイルだけを除外し、理由をプレビューに出す。
+      // 同じ日付を含むファイルが複数あったら二重計上を防ぐため
+      // 最初の1ファイルだけを有効とし、後続は除外する。
+      const ok: NonNullable<typeof sokubaiPending>["ok"] = [];
+      const ng: { name: string; reason: string }[] = [];
+      const seenDates = new Set<string>();
+      for (const entry of entries) {
+        try {
+          const text = decodeCsvBuffer(entry.buf);
+          const { rows } = parseSokubaiCsv(text);
+          if (rows.length === 0) {
+            ng.push({
+              name: entry.name,
+              reason: "取り込める売上行がありませんでした。",
+            });
+            continue;
+          }
+          const dates = [...new Set(rows.map((r) => r.date))].sort();
+          const dup = dates.find((d) => seenDates.has(d));
+          if (dup) {
+            ng.push({
+              name: entry.name,
+              reason: `同じ日付（${dup}）のファイルが既にあるため除外しました。`,
+            });
+            continue;
+          }
+          for (const d of dates) seenDates.add(d);
+          ok.push({
+            name: entry.name,
+            dates,
+            qty: rows.reduce((s, r) => s + r.qty, 0),
+            total: rows.reduce((s, r) => s + r.net, 0),
+            rows,
+          });
+        } catch (e) {
+          ng.push({
+            name: entry.name,
+            reason: e instanceof Error ? e.message : String(e),
+          });
+        }
+      }
+      if (ok.length === 0) {
+        setSokubaiErr("取り込めるファイルがありませんでした。");
+      }
+      setSokubaiPending({ ok, ng });
     } catch (e) {
       setSokubaiErr(e instanceof Error ? e.message : String(e));
     }
@@ -390,82 +527,30 @@ export function CsvImportView() {
     }
   };
 
-  const onEventFile = async (ev: ChangeEvent<HTMLInputElement>) => {
-    const file = ev.target.files?.[0];
-    ev.target.value = "";
-    if (!file) return;
-    setEventMsg(null);
-    setEventErr(null);
-    try {
-      const text = decodeCsvBuffer(await file.arrayBuffer());
-      const events = parseEventCsv(text);
-      const filled = events.filter((e) => e.eventName || e.venue || e.city || e.prefecture);
-      if (filled.length === 0) {
-        setEventErr("イベント情報が入力された行がありませんでした。");
-        return;
-      }
-      importEvents.mutate(filled);
-    } catch (e) {
-      setEventErr(e instanceof Error ? e.message : String(e));
-    }
-  };
-
-  const replaceMaster = useMutation({
-    mutationFn: async (events: EventRow[]) =>
-      await api.replaceMasterEvents({ events }),
-    onSuccess: (res) => {
-      void queryClient.invalidateQueries({ queryKey: ["masterEvents"] });
-      setMasterPending(null);
-      setMasterMsg(
-        `標準イベント一覧を${res.replaced}件で丸ごと差し替えました。登録済みのイベント（参加実績）は変わりません。`,
-      );
-    },
-    onError: (e) => setMasterErr(`差し替えに失敗しました：${String(e)}`),
-  });
-
-  const onMasterFile = async (ev: ChangeEvent<HTMLInputElement>) => {
-    const file = ev.target.files?.[0];
-    ev.target.value = "";
-    if (!file) return;
-    setMasterMsg(null);
-    setMasterErr(null);
-    setMasterPending(null);
-    try {
-      const text = decodeCsvBuffer(await file.arrayBuffer());
-      const rows = parseEventCsv(text);
-      const filled = rows.filter((r) => r.eventName);
-      if (filled.length === 0) {
-        setMasterErr("イベント名の入った行がありませんでした。");
-        return;
-      }
-      setMasterPending(filled);
-    } catch (e) {
-      setMasterErr(e instanceof Error ? e.message : String(e));
-    }
-  };
-
-  const onExportEvents = async () => {
-    setExportErr(null);
-    try {
-      // Same full-fidelity export as the データのエクスポート
-      // section (includes the event_type / sales_unreliable backup
-      // columns), with the export date in the file name.
-      const res = await api.getExportData({});
-      downloadTextFile(`events-${exportDateStamp()}.csv`, eventsToCsv(res.events));
-    } catch (e) {
-      setExportErr(`書き出しに失敗しました：${String(e)}`);
-    }
-  };
-
   return (
     <div className="grid gap-4">
+      <section className={sectionCls} aria-labelledby="dt-about">
+        <h2 id="dt-about" className="font-ledger text-base font-bold">
+          この台帳に保存されるもの
+        </h2>
+        <ul className="mt-1 list-disc pl-5 text-sm text-[var(--dim)]">
+          <li>売上の日付×頒布物集計（日付・頒布物名・カテゴリ・冊数・金額・取引件数）</li>
+          <li>自分で登録したイベント情報（イベント名・開催施設・都道府県・市区町村・メモ）</li>
+          <li>標準イベント一覧（候補表示専用の参照データ。参加実績とは別に保存され、件数などの集計には入りません）</li>
+        </ul>
+        <p className="mt-2 text-sm text-[var(--dim)]">
+          注文ID・支払いID・顧客情報・デバイス名・カード情報・店舗名は、取り込み時にも保存時にも扱いません。
+        </p>
+      </section>
       {showSquareImport && (
       <section id="csv-import-section" className={sectionCls} aria-labelledby="dt-square">
         <h2 id="dt-square" className="font-ledger text-base font-bold">
           Square売上CSVを取り込む
         </h2>
         <p className="mt-1 text-sm text-[var(--dim)]">
-          Squareの「商品売上」CSV（UTF-16／タブ区切り）を、この端末内で日付×頒布物に集計して取り込みます。注文ID・顧客情報・カード情報などは読み取らず、保存もしません。同じ日付・頒布物は新しい集計で置き換わります。
+          Squareの「商品売上」CSV（UTF-16／タブ区切り）を取り込みます。注文ID・顧客情報・カード情報などは読み取らず、保存もしません。
+          <br />
+          ※同じ日付・頒布物は新しい集計で置き換わり、完売チェックなどの手入力フラグは保持されます。
         </p>
         <div className="mt-3 rounded-[var(--radius)] bg-[var(--surface-alt)] p-3">
           <p className="text-sm font-bold">CSVの取得手順（Squareダッシュボード）</p>
@@ -481,28 +566,9 @@ export function CsvImportView() {
               </a>
               で「レポート」→「商品別売上」を開く
             </li>
-            <li>取り込みたい期間だけを表示範囲に設定する（下記参照）</li>
+            <li>取り込みたい期間だけを表示範囲に設定する（※最大一年分づつしか登録できないので注意）</li>
             <li>右上のメニューから「詳細CSV」をダウンロードする</li>
           </ol>
-          <p className="mt-2 text-sm font-bold">表示範囲の決め方</p>
-          <ul className="mt-1 list-disc space-y-0.5 pl-5 text-sm text-[var(--dim)]">
-            <li>
-              <span className="font-medium text-[var(--text)]">1日分だけ取り込む場合</span>：
-              表示範囲をその日だけ（開始日＝終了日＝その日）に設定する
-            </li>
-            <li>
-              <span className="font-medium text-[var(--text)]">任意の期間を取り込む場合</span>：
-              表示範囲をその期間だけに設定する
-            </li>
-            <li>
-              <span className="font-medium text-[var(--text)]">全期間を取り込む場合</span>：
-              表示範囲を 1/1〜12/31 に設定し（取得できるのは1年分まで）、
-              年の数だけ（必要な年ごとに）同じ手順を繰り返す
-            </li>
-          </ul>
-          <p className="mt-2 text-sm text-[var(--dim)]">
-            ※期間が重なるCSVを取り込んでも二重登録にはなりません（同じ日付は置き換え・上書きのみ）。
-          </p>
         </div>
         <input
           ref={squareRef}
@@ -535,22 +601,25 @@ export function CsvImportView() {
           即売レジ売上CSVを取り込む
         </h2>
         <p className="mt-1 text-sm text-[var(--dim)]">
-          同人特化の現金レジアプリ「即売レジ」の販売記録CSV（1日1ファイル）にも対応しています。この端末内で日付×頒布物に集計して取り込みます。日付はファイル名ではなくCSV内の取引日時から判定し、金額はファイル末尾の合計額を正とします。取引の小計合計と合計額が一致しないファイルは、内容を確認できるよう取り込まずに知らせます。他のCSV取込と同じく、同じ日付・頒布物は新しい集計で置き換わり、完売チェックなどの手入力フラグは保持されます。
+          同人特化の現金レジアプリ「即売レジ」でエクスポートできる販売記録CSVを取り込みます。取引の小計合計と合計額が一致しないファイルは、内容を確認できるよう取り込まずに知らせます。複数日分のCSVは、ZIPファイルにまとめて（または複数ファイルを同時に選んで）一括で取り込むこともできます。
+          <br />
+          ※同じ日付・頒布物は新しい集計で置き換わり、完売チェックなどの手入力フラグは保持されます。
         </p>
         <div className="mt-3 rounded-[var(--radius)] bg-[var(--surface-alt)] p-3">
           <p className="text-sm font-bold">CSVの取得手順（即売レジ）</p>
           <ol className="mt-1 list-decimal space-y-0.5 pl-5 text-sm text-[var(--dim)]">
             <li>即売レジで「記録をつける」をオンにして販売を記録する</li>
             <li>記録管理からその日の販売記録CSVを共有／書き出す（ファイル名は log@日時.csv など）</li>
-            <li>書き出したCSVをここで選ぶ（1日分ずつ取り込めます）</li>
+            <li>書き出したCSVをここで選ぶ（複数日分をZIPにまとめても、複数ファイルを同時に選んでも取り込めます）</li>
           </ol>
         </div>
         <input
           ref={sokubaiRef}
           type="file"
-          accept=".csv,text/csv"
+          accept=".csv,.zip,text/csv,application/zip"
+          multiple
           className="hidden"
-          aria-label="即売レジ売上CSVファイル"
+          aria-label="即売レジ売上CSVファイル（ZIP・複数選択可）"
           onChange={(e) => void onSokubaiFile(e)}
         />
         <button
@@ -559,8 +628,66 @@ export function CsvImportView() {
           disabled={importSokubai.isPending}
           onClick={() => sokubaiRef.current?.click()}
         >
-          {importSokubai.isPending ? "取り込み中…" : "CSVファイルを選ぶ"}
+          {importSokubai.isPending ? "取り込み中…" : "CSV／ZIPファイルを選ぶ"}
         </button>
+        {sokubaiPending && (
+          <div className="mt-3 rounded-[var(--radius)] bg-[var(--surface-alt)] p-3">
+            <p className="text-sm font-bold">取り込み内容の確認</p>
+            {sokubaiPending.ok.length > 0 && (
+              <>
+                <ul className="mt-1 space-y-0.5 text-sm">
+                  {sokubaiPending.ok.map((f, i) => (
+                    <li key={`${f.name}-${i}`}>
+                      {f.name}：{f.dates.join("・")}／{qtyMasked(f.qty, masked)}冊・売上{" "}
+                      {yenMasked(f.total, masked)}
+                    </li>
+                  ))}
+                </ul>
+                <p className="mt-1 text-sm">
+                  合計：{sokubaiPending.ok.length}ファイル・
+                  {new Set(sokubaiPending.ok.flatMap((f) => f.dates)).size}日分・
+                  {qtyMasked(sokubaiPending.ok.reduce((s, f) => s + f.qty, 0), masked)}冊・
+                  売上 {yenMasked(sokubaiPending.ok.reduce((s, f) => s + f.total, 0), masked)}
+                </p>
+              </>
+            )}
+            {sokubaiPending.ng.length > 0 && (
+              <div className="mt-2">
+                <p className="text-sm text-[var(--accent)]">
+                  除外されたファイルが{sokubaiPending.ng.length}件あります（これらのファイルは取り込みません）：
+                </p>
+                <ul className="mt-1 list-disc space-y-0.5 pl-5 text-sm text-[var(--dim)]">
+                  {sokubaiPending.ng.map((f, i) => (
+                    <li key={`${f.name}-${i}`}>
+                      {f.name}：{f.reason}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            <div className="mt-2 flex flex-wrap gap-2">
+              {sokubaiPending.ok.length > 0 && (
+                <button
+                  type="button"
+                  className="rounded-[var(--radius)] bg-[var(--accent)] px-4 py-2 text-sm font-bold text-white disabled:opacity-50"
+                  disabled={importSokubai.isPending}
+                  onClick={() =>
+                    importSokubai.mutate(sokubaiPending.ok.flatMap((f) => f.rows))
+                  }
+                >
+                  {importSokubai.isPending ? "取り込み中…" : "この内容で取り込む"}
+                </button>
+              )}
+              <button
+                type="button"
+                className={btnCls}
+                onClick={() => setSokubaiPending(null)}
+              >
+                やめる
+              </button>
+            </div>
+          </div>
+        )}
         {sokubaiMsg && <p className="mt-2 text-sm">{sokubaiMsg}</p>}
         {sokubaiErr && (
           <p role="alert" className="mt-2 text-sm text-[var(--accent)]">
@@ -576,7 +703,9 @@ export function CsvImportView() {
           手記録CSVを取り込む
         </h2>
         <p className="mt-1 text-sm text-[var(--dim)]">
-          Squareやレジアプリを使わず、自分で記録した売上を取り込むための形式です。表計算ソフトなどで下の形式のCSVを作って選ぶと、内容を確認してから取り込みます。この端末内で日付×頒布物に集計し、他のCSV取込と同じく同じ日付・頒布物は新しい集計で置き換わり、完売チェックなどの手入力フラグは保持されます。
+          自分で記録した売上をCSV形式で取り込みます。表計算ソフトなどで「日付（YYYY-MM-DD）,頒布物名,冊数,金額,カテゴリ」の形式で記入例のようにCSVファイルを作ってください。
+          <br />
+          ※同じ日付・頒布物は新しい集計で置き換わり、完売チェックなどの手入力フラグは保持されます。
         </p>
         <div className="mt-3 rounded-[var(--radius)] bg-[var(--surface-alt)] p-3">
           <p className="text-sm font-bold">手記録CSVの形式</p>
@@ -693,136 +822,278 @@ export function CsvImportView() {
       </section>
       )}
 
-      <section className={sectionCls} aria-labelledby="dt-events">
-        <h2 id="dt-events" className="font-ledger text-base font-bold">
-          イベント登録CSVを取り込む
+      <section className={sectionCls} aria-labelledby="dt-product-settings">
+        <h2 id="dt-product-settings" className="font-ledger text-base font-bold">
+          頒布物設定CSVを取り込む
         </h2>
         <p className="mt-1 text-sm text-[var(--dim)]">
-          列は date, event_name, venue, prefecture, city, note（日付はYYYY-MM-DD）。同じ日付は置き換わります。
+          <button
+            type="button"
+            onClick={onOpenExport}
+            className="font-medium text-[var(--text)] underline underline-offset-2"
+          >
+            データのエクスポート
+          </button>
+          （データ管理＞総合管理）で書き出した「頒布物設定」を復元します。売上がまだ無い頒布物の登録もこの取り込みで戻ります。同じ頒布物の設定はファイルの内容で置き換わります。売上そのものは取り込みません。
         </p>
         <input
-          ref={eventRef}
+          ref={productSettingsRef}
           type="file"
           accept=".csv,text/csv"
           className="hidden"
-          aria-label="イベント登録CSVファイル"
-          onChange={(e) => void onEventFile(e)}
+          aria-label="頒布物設定CSVファイル"
+          onChange={(e) => void onProductSettingsFile(e)}
         />
         <div className="mt-3 flex flex-wrap gap-2">
           <button
             type="button"
             className={btnCls}
-            disabled={importEvents.isPending}
-            onClick={() => eventRef.current?.click()}
+            disabled={importProductSettings.isPending}
+            onClick={() => productSettingsRef.current?.click()}
           >
-            {importEvents.isPending ? "取り込み中…" : "CSVファイルを選ぶ"}
-          </button>
-          <button type="button" className={btnCls} onClick={() => void onExportEvents()}>
-            登録済みイベントをCSVで書き出す
+            {importProductSettings.isPending ? "取り込み中…" : "CSVファイルを選ぶ"}
           </button>
         </div>
-        {eventMsg && <p className="mt-2 text-sm">{eventMsg}</p>}
-        {eventErr && (
+        {productSettingsMsg && <p className="mt-2 text-sm">{productSettingsMsg}</p>}
+        {productSettingsErr && (
           <p role="alert" className="mt-2 text-sm text-[var(--accent)]">
-            {eventErr}
-          </p>
-        )}
-        {exportErr && (
-          <p role="alert" className="mt-2 text-sm text-[var(--accent)]">
-            {exportErr}
+            {productSettingsErr}
           </p>
         )}
       </section>
 
-      <section className={sectionCls} aria-labelledby="dt-master">
-        <h2 id="dt-master" className="font-ledger text-base font-bold">
-          標準イベント一覧を差し替える
-        </h2>
-        <p className="mt-1 text-sm text-[var(--dim)]">
-          標準イベント一覧（現在{masterCount === null ? "…" : `${masterCount}件`}）は、イベント登録フォームや未登録チェックで表示される候補の元データです。参照専用で、参加実績には混ざりません。新しいマスターCSV（列は
-          date, event_name, venue, prefecture, city,
-          note）を選ぶと、確認のうえ現在の候補を丸ごと差し替えます。登録済みのイベントは変わりません。
-        </p>
-        <p className="mt-1 text-sm text-[var(--dim)]">
-          標準イベント一覧の最新版は GitHub で公開しています：
-          <a
-            href="https://github.com/ntfiv/doujin-event-master"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-[var(--accent)] underline"
-          >
-            ntfiv/doujin-event-master
-          </a>
-          （新しいマスターCSVはここからダウンロードできます）
-        </p>
-        <input
-          ref={masterRef}
-          type="file"
-          accept=".csv,text/csv"
-          className="hidden"
-          aria-label="標準イベント一覧CSVファイル"
-          onChange={(e) => void onMasterFile(e)}
-        />
-        <button
-          type="button"
-          className={`${btnCls} mt-3`}
-          disabled={replaceMaster.isPending}
-          onClick={() => masterRef.current?.click()}
-        >
-          マスターCSVファイルを選ぶ
-        </button>
-        {masterPending && (
-          <div className="mt-3 rounded-[var(--radius)] bg-[var(--surface-alt)] p-3">
-            <p className="text-sm">
-              {masterPending.length}件の候補を読み取りました。現在の標準イベント一覧（
-              {masterCount === null ? "…" : `${masterCount}件`}）を丸ごと差し替えますか？
-            </p>
-            <div className="mt-2 flex flex-wrap gap-2">
-              <button
-                type="button"
-                className="rounded-[var(--radius)] bg-[var(--accent)] px-4 py-2 text-sm font-bold text-white disabled:opacity-50"
-                disabled={replaceMaster.isPending}
-                onClick={() => replaceMaster.mutate(masterPending)}
-              >
-                {replaceMaster.isPending ? "差し替え中…" : "差し替える"}
-              </button>
-              <button
-                type="button"
-                className={btnCls}
-                onClick={() => setMasterPending(null)}
-              >
-                やめる
-              </button>
-            </div>
-          </div>
-        )}
-        {masterMsg && <p className="mt-2 text-sm">{masterMsg}</p>}
-        {masterErr && (
-          <p role="alert" className="mt-2 text-sm text-[var(--accent)]">
-            {masterErr}
-          </p>
-        )}
-      </section>
-
-      <section className={sectionCls} aria-labelledby="dt-about">
-        <h2 id="dt-about" className="font-ledger text-base font-bold">
-          この台帳に保存されるもの
-        </h2>
-        <ul className="mt-1 list-disc pl-5 text-sm text-[var(--dim)]">
-          <li>売上の日付×頒布物集計（日付・頒布物名・カテゴリ・冊数・金額・取引件数）</li>
-          <li>自分で登録したイベント情報（イベント名・開催施設・都道府県・市区町村・メモ）</li>
-          <li>標準イベント一覧（候補表示専用の参照データ。参加実績とは別に保存され、件数などの集計には入りません）</li>
-        </ul>
-        <p className="mt-2 text-sm text-[var(--dim)]">
-          注文ID・支払いID・顧客情報・デバイス名・カード情報・店舗名は、取り込み時にも保存時にも扱いません。
-        </p>
-      </section>
     </div>
   );
 }
 
 /**
- * データ管理タブの一番下: データのエクスポート. Downloads the data
+ * データ管理＞イベント管理: イベント登録CSVを取り込む. Moved here
+ * from the 売上を取り込む view; the 登録済みイベントをCSVで書き出す
+ * button that belongs to this section moved with it. Always shown
+ * (not part of the 使用するCSV取り込み display choice).
+ */
+export function EventCsvImportSection() {
+  const queryClient = useQueryClient();
+  const eventRef = useRef<HTMLInputElement>(null);
+  const [eventMsg, setEventMsg] = useState<string | null>(null);
+  const [eventErr, setEventErr] = useState<string | null>(null);
+  const [exportErr, setExportErr] = useState<string | null>(null);
+
+  const importEvents = useMutation({
+    mutationFn: async (events: Parameters<typeof api.importEvents>[0]["events"]) =>
+      await api.importEvents({ events }),
+    onSuccess: (res) => {
+      invalidateAll(queryClient);
+      setEventMsg(`${res.imported}件のイベント登録を取り込みました。`);
+    },
+    onError: (e) => setEventErr(`取り込みに失敗しました：${String(e)}`),
+  });
+
+  const onEventFile = async (ev: ChangeEvent<HTMLInputElement>) => {
+    const file = ev.target.files?.[0];
+    ev.target.value = "";
+    if (!file) return;
+    setEventMsg(null);
+    setEventErr(null);
+    try {
+      const text = decodeCsvBuffer(await file.arrayBuffer());
+      const events = parseEventCsv(text);
+      const filled = events.filter((e) => e.eventName || e.venue || e.city || e.prefecture);
+      if (filled.length === 0) {
+        setEventErr("イベント情報が入力された行がありませんでした。");
+        return;
+      }
+      importEvents.mutate(filled);
+    } catch (e) {
+      setEventErr(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const onExportEvents = async () => {
+    setExportErr(null);
+    try {
+      // Same full-fidelity export as the データのエクスポート
+      // section (includes the event_type / sales_unreliable backup
+      // columns), with the export date in the file name.
+      const res = await api.getExportData({});
+      downloadTextFile(`events-${exportDateStamp()}.csv`, eventsToCsv(res.events));
+    } catch (e) {
+      setExportErr(`書き出しに失敗しました：${String(e)}`);
+    }
+  };
+
+  return (
+    <section className={sectionCls} aria-labelledby="dt-events">
+      <h2 id="dt-events" className="font-ledger text-base font-bold">
+        イベント登録CSVを取り込む
+      </h2>
+      <p className="mt-1 text-sm text-[var(--dim)]">
+        列は date, event_name, venue, prefecture, city, note（日付はYYYY-MM-DD）。同じ日付は置き換わります。
+      </p>
+      <input
+        ref={eventRef}
+        type="file"
+        accept=".csv,text/csv"
+        className="hidden"
+        aria-label="イベント登録CSVファイル"
+        onChange={(e) => void onEventFile(e)}
+      />
+      <div className="mt-3 flex flex-wrap gap-2">
+        <button
+          type="button"
+          className={btnCls}
+          disabled={importEvents.isPending}
+          onClick={() => eventRef.current?.click()}
+        >
+          {importEvents.isPending ? "取り込み中…" : "CSVファイルを選ぶ"}
+        </button>
+        <button type="button" className={btnCls} onClick={() => void onExportEvents()}>
+          登録済みイベントをCSVで書き出す
+        </button>
+      </div>
+      {eventMsg && <p className="mt-2 text-sm">{eventMsg}</p>}
+      {eventErr && (
+        <p role="alert" className="mt-2 text-sm text-[var(--accent)]">
+          {eventErr}
+        </p>
+      )}
+      {exportErr && (
+        <p role="alert" className="mt-2 text-sm text-[var(--accent)]">
+          {exportErr}
+        </p>
+      )}
+    </section>
+  );
+}
+
+/**
+ * データ管理＞総合管理: 標準イベント一覧を差し替える. Moved here
+ * from the 売上を取り込む view, GitHubへの案内・リンク included. Always shown
+ * (not part of the 使用するCSV取り込み display choice).
+ */
+export function MasterReplaceSection() {
+  const queryClient = useQueryClient();
+  const masterRef = useRef<HTMLInputElement>(null);
+  const [masterMsg, setMasterMsg] = useState<string | null>(null);
+  const [masterErr, setMasterErr] = useState<string | null>(null);
+  // Parsed master CSV waiting for the replace confirmation.
+  const [masterPending, setMasterPending] = useState<EventRow[] | null>(null);
+
+  const masterQuery = useQuery({
+    queryKey: ["masterEvents"],
+    queryFn: () => api.getMasterEvents({}),
+  });
+  const masterCount = masterQuery.data?.events.length ?? null;
+
+  const replaceMaster = useMutation({
+    mutationFn: async (events: EventRow[]) =>
+      await api.replaceMasterEvents({ events }),
+    onSuccess: (res) => {
+      void queryClient.invalidateQueries({ queryKey: ["masterEvents"] });
+      setMasterPending(null);
+      setMasterMsg(
+        `標準イベント一覧を${res.replaced}件で丸ごと差し替えました。登録済みのイベント（参加実績）は変わりません。`,
+      );
+    },
+    onError: (e) => setMasterErr(`差し替えに失敗しました：${String(e)}`),
+  });
+
+  const onMasterFile = async (ev: ChangeEvent<HTMLInputElement>) => {
+    const file = ev.target.files?.[0];
+    ev.target.value = "";
+    if (!file) return;
+    setMasterMsg(null);
+    setMasterErr(null);
+    setMasterPending(null);
+    try {
+      const text = decodeCsvBuffer(await file.arrayBuffer());
+      const rows = parseEventCsv(text);
+      const filled = rows.filter((r) => r.eventName);
+      if (filled.length === 0) {
+        setMasterErr("イベント名の入った行がありませんでした。");
+        return;
+      }
+      setMasterPending(filled);
+    } catch (e) {
+      setMasterErr(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  return (
+    <section className={sectionCls} aria-labelledby="dt-master">
+      <h2 id="dt-master" className="font-ledger text-base font-bold">
+        標準イベント一覧を差し替える
+      </h2>
+      <p className="mt-1 text-sm text-[var(--dim)]">
+        標準イベント一覧（現在{masterCount === null ? "…" : `${masterCount}件`}）は、イベント登録フォームや未登録チェックで表示される候補の元データです。参照専用で、参加実績には混ざりません。新しいマスターCSV（列は
+        date, event_name, venue, prefecture, city,
+        note）を選ぶと、確認のうえ現在の候補を丸ごと差し替えます。登録済みのイベントは変わりません。
+      </p>
+      <p className="mt-1 text-sm text-[var(--dim)]">
+        標準イベント一覧の最新版は GitHub で公開しています：
+        <a
+          href="https://github.com/ntfiv/doujin-event-master"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-[var(--accent)] underline"
+        >
+          ntfiv/doujin-event-master
+        </a>
+        （新しいマスターCSVはここからダウンロードできます）
+      </p>
+      <input
+        ref={masterRef}
+        type="file"
+        accept=".csv,text/csv"
+        className="hidden"
+        aria-label="標準イベント一覧CSVファイル"
+        onChange={(e) => void onMasterFile(e)}
+      />
+      <button
+        type="button"
+        className={`${btnCls} mt-3`}
+        disabled={replaceMaster.isPending}
+        onClick={() => masterRef.current?.click()}
+      >
+        マスターCSVファイルを選ぶ
+      </button>
+      {masterPending && (
+        <div className="mt-3 rounded-[var(--radius)] bg-[var(--surface-alt)] p-3">
+          <p className="text-sm">
+            {masterPending.length}件の候補を読み取りました。現在の標準イベント一覧（
+            {masterCount === null ? "…" : `${masterCount}件`}）を丸ごと差し替えますか？
+          </p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="rounded-[var(--radius)] bg-[var(--accent)] px-4 py-2 text-sm font-bold text-white disabled:opacity-50"
+              disabled={replaceMaster.isPending}
+              onClick={() => replaceMaster.mutate(masterPending)}
+            >
+              {replaceMaster.isPending ? "差し替え中…" : "差し替える"}
+            </button>
+            <button
+              type="button"
+              className={btnCls}
+              onClick={() => setMasterPending(null)}
+            >
+              やめる
+            </button>
+          </div>
+        </div>
+      )}
+      {masterMsg && <p className="mt-2 text-sm">{masterMsg}</p>}
+      {masterErr && (
+        <p role="alert" className="mt-2 text-sm text-[var(--accent)]">
+          {masterErr}
+        </p>
+      )}
+    </section>
+  );
+}
+
+/**
+ * データ管理＞総合管理: データのエクスポート. Downloads the data
  * the user entered as CSV files in this app's own import formats,
  * so an export doubles as a backup that can be re-imported as-is.
  * Data is fetched fresh from getExportData on every click; file
@@ -831,9 +1102,9 @@ export function CsvImportView() {
 export function DataExportSection() {
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [busy, setBusy] = useState<"sales" | "events" | "inventory" | null>(null);
+  const [busy, setBusy] = useState<"sales" | "events" | "inventory" | "products" | null>(null);
 
-  const run = async (kind: "sales" | "events" | "inventory") => {
+  const run = async (kind: "sales" | "events" | "inventory" | "products") => {
     setMsg(null);
     setErr(null);
     setBusy(kind);
@@ -850,13 +1121,18 @@ export function DataExportSection() {
         setMsg(
           `イベント登録${data.events.length}件を書き出しました（events-${stamp}.csv）。`,
         );
+      } else if (kind === "products") {
+        downloadTextFile(`products-${stamp}.csv`, productsToCsv(data.products));
+        setMsg(
+          `頒布物設定${data.products.length}件を書き出しました（products-${stamp}.csv）。`,
+        );
       } else {
         downloadTextFile(
           `inventory-memos-${stamp}.csv`,
           inventoryMemosToCsv(data.inventoryMemos),
         );
         setMsg(
-          `在庫メモ${data.inventoryMemos.length}日分を書き出しました（inventory-memos-${stamp}.csv）。`,
+          `イベントメモ${data.inventoryMemos.length}日分を書き出しました（inventory-memos-${stamp}.csv）。`,
         );
       }
     } catch (e) {
@@ -867,7 +1143,7 @@ export function DataExportSection() {
   };
 
   return (
-    <section className={sectionCls} aria-labelledby="dt-export">
+    <section id="dt-export-section" className={sectionCls} aria-labelledby="dt-export">
       <h2 id="dt-export" className="font-ledger text-base font-bold">
         データのエクスポート
       </h2>
@@ -877,17 +1153,19 @@ export function DataExportSection() {
       <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-[var(--dim)]">
         <li>
           <span className="font-medium text-[var(--text)]">売上データ</span>
-          ：手記録CSVと同じ形式（日付・頒布物名・冊数・金額・カテゴリ）で、金額は純売上です。手入力の「完売」は完売列（1＝完売）として含め、取り込み直すと復元されます。取引件数と総売上高は手記録CSVの形式にないため含まれません。
+          ：手記録CSVと同じ形式（日付・頒布物名・冊数・金額・カテゴリ）で、金額は純売上です。手入力の「完売」も含め、取り込み直すと復元されます。取引件数と総売上高は手記録CSVの形式にないため含まれません。
         </li>
         <li>
           <span className="font-medium text-[var(--text)]">イベント登録</span>
-          ：イベント登録CSVと同じ形式（date, event_name, venue, prefecture,
-          city,
-          note）に、手動設定したイベント種別（event_type列）と「売り上げは参考情報」フラグ（sales_unreliable列：1＝設定あり）の列を追加したものです。取り込み直すと種別・フラグも復元されます。
+          ：イベント登録CSVと同じ形式に、手動設定したイベント種別と「売上は参考情報」フラグの列を追加したものです。取り込み直すと種別・フラグも復元されます。
         </li>
         <li>
-          <span className="font-medium text-[var(--text)]">在庫メモ</span>
+          <span className="font-medium text-[var(--text)]">イベントメモ</span>
           ：日付ごとにURL・頒布物名・送った冊数・自由メモが分かるCSVです（参照用で、取り込みには対応していません）。
+        </li>
+        <li>
+          <span className="font-medium text-[var(--text)]">頒布物設定</span>
+          ：頒布物ごとのカテゴリ・発行日・根拠メモ・廃盤・除外フラグのCSVです。売上がまだ無い頒布物（手入力で登録した本）の設定はこのファイルにだけ残ります。「売上を取り込む」の「頒布物設定CSVを取り込む」から取り込み直すと復元されます。
         </li>
       </ul>
       <div className="mt-3 flex flex-wrap gap-2">
@@ -913,7 +1191,15 @@ export function DataExportSection() {
           disabled={busy !== null}
           onClick={() => void run("inventory")}
         >
-          {busy === "inventory" ? "書き出し中…" : "在庫メモを書き出す"}
+          {busy === "inventory" ? "書き出し中…" : "イベントメモを書き出す"}
+        </button>
+        <button
+          type="button"
+          className={btnCls}
+          disabled={busy !== null}
+          onClick={() => void run("products")}
+        >
+          {busy === "products" ? "書き出し中…" : "頒布物設定を書き出す"}
         </button>
       </div>
       {msg && <p className="mt-2 text-sm">{msg}</p>}
@@ -927,7 +1213,7 @@ export function DataExportSection() {
 }
 
 /**
- * データ管理タブの一番下（エクスポートの下）: テスト用ダミーデータ
+ * データ管理＞総合管理（エクスポートの下）: テスト用ダミーデータ
  * の投入と、すべての入力データのリセット. The reset is gated
  * behind a confirmation dialog that spells out exactly what is
  * deleted and what is kept, plus an acknowledgement checkbox —
@@ -974,7 +1260,7 @@ export function DataResetSection() {
       setResetAck(false);
       setResetErr(null);
       setResetMsg(
-        `リセットしました（売上${res.sales}件・イベント登録${res.events}件・在庫メモ${res.inventoryMemos}日分を削除）。`,
+        `リセットしました（売上${res.sales}件・イベント登録${res.events}件・イベントメモ${res.inventoryMemos}日分を削除）。`,
       );
     },
     onError: (e) => setResetErr(`リセットに失敗しました：${String(e)}`),
@@ -1043,10 +1329,10 @@ export function DataResetSection() {
         <ul className="mt-2 list-disc space-y-0.5 pl-5 text-sm text-[var(--dim)]">
           <li>売上データ（全件。ダミーデータも含みます）</li>
           <li>登録したイベント（イベント名・会場・メモ・手動のイベント種別）</li>
-          <li>「売り上げは参考情報」の日次フラグ</li>
+          <li>「売上は参考情報」の日次フラグ</li>
           <li>頒布物の設定（発行日・廃盤・除外フラグ）</li>
           <li>頒布物の別名（旧名）と統合履歴</li>
-          <li>在庫メモ（URL・冊数・自由メモ）</li>
+          <li>イベントメモ（URL・冊数・自由メモ）</li>
         </ul>
         <p className="mt-2 text-sm text-[var(--dim)]">
           残るもの：標準イベント一覧（マスター）、イベント種別の定義、表示設定などの端末側の設定。

@@ -7,7 +7,7 @@ import { DayRow, NewEventSection } from "./Ledger";
 import { CompareTable } from "./Compare";
 import { ProductsView } from "./Products";
 import { ChartsView } from "./Charts";
-import { CsvImportSettingsSection, CsvImportView, DataExportSection, DataResetSection, DisplaySettingsSection, ScreenshotModeSection } from "./DataTools";
+import { CsvImportSettingsSection, CsvImportView, DataExportSection, DataResetSection, DisplaySettingsSection, EventCsvImportSection, MasterReplaceSection, ScreenshotModeSection } from "./DataTools";
 import { ProductAdminSections } from "./ProductAdmin";
 import { UnregisteredView } from "./Unregistered";
 import { EventTypeManageSection, EventTypeSection } from "./EventAdmin";
@@ -17,18 +17,20 @@ import { matchesPlaceName, matchesQuery } from "./search";
 import { dateLabelNoWeekday } from "./format";
 import { MaskProvider } from "./mask";
 import { DisplaySettingsProvider } from "./display";
+import { HelpView } from "./Help";
 
 type Tab = "ledger" | "products" | "charts" | "data";
 
 /**
- * What the main area shows: one of the four tabs, or one of the two
+ * What the main area shows: one of the four tabs, or one of the
  * dedicated views reached from the top-right shortcut buttons
- * (設定 = screenshot mode, CSV取込 = the CSV import page).
+ * (使い方 = the usage guide, 設定 = screenshot mode, CSV取込 = the
+ * CSV import page).
  */
-type View = Tab | "settings" | "csv";
+type View = Tab | "help" | "settings" | "csv";
 
 /** Sub-tab inside the データ管理 tab. */
-type DataSubTab = "products" | "events";
+type DataSubTab = "products" | "events" | "general";
 
 /** Ledger event-type filter value: "" = all, "unregistered" = イベント未登録の日. */
 type TypeFilter = "" | EventTypeId | "unregistered";
@@ -43,6 +45,7 @@ const TABS: { id: Tab; label: string }[] = [
 const DATA_SUB_TABS: { id: DataSubTab; label: string }[] = [
   { id: "products", label: "頒布物管理" },
   { id: "events", label: "イベント管理" },
+  { id: "general", label: "総合管理" },
 ];
 
 export function App() {
@@ -123,6 +126,19 @@ export function App() {
       document
         .querySelector(`[data-day="${date}"]`)
         ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 200);
+  };
+
+  // Jump from 売上を取り込む's 頒布物設定CSV section to the
+  // データのエクスポート section (データ管理 > 総合管理）: switch
+  // tabs, then scroll the export section into view once rendered.
+  const openExportSection = () => {
+    setDataSubTab("general");
+    setView("data");
+    window.setTimeout(() => {
+      document
+        .querySelector("#dt-export-section")
+        ?.scrollIntoView({ behavior: "smooth", block: "start" });
     }, 200);
   };
 
@@ -248,18 +264,19 @@ export function App() {
                   <span className="tnum">{data.registeredCount.toLocaleString("ja-JP")}件</span>
                 </span>
               </p>
-              {/* Top-right shortcuts to the two dedicated views:
-                  設定 (screenshot mode) and CSV取込 (CSV import). */}
+              {/* Top-right shortcuts to the dedicated views:
+                  使い方 (usage guide), 設定 (screenshot mode) and
+                  CSV取込 (CSV import). */}
               <div className="flex shrink-0 gap-1.5">
-                {/* 使い方 is a placeholder for now: disabled until
-                    its content is built later. Styled like the other
-                    shortcut buttons but muted so it reads as
-                    unavailable. */}
                 <button
                   type="button"
-                  disabled
-                  title="準備中"
-                  className="cursor-not-allowed rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1 text-xs font-medium text-[var(--dim)] opacity-50"
+                  aria-pressed={view === "help"}
+                  onClick={() => setView("help")}
+                  className={`rounded-[var(--radius)] border px-2.5 py-1 text-xs font-medium ${
+                    view === "help"
+                      ? "border-[var(--accent)] bg-[var(--accent-soft)] font-bold text-[var(--accent)]"
+                      : "border-[var(--border)] bg-[var(--surface)]"
+                  }`}
                 >
                   使い方
                 </button>
@@ -285,7 +302,7 @@ export function App() {
                       : "border-[var(--border)] bg-[var(--surface)]"
                   }`}
                 >
-                  CSV取込
+                  売上を取り込む
                 </button>
               </div>
             </section>
@@ -436,7 +453,7 @@ export function App() {
                 </div>
                 {compareMode && (
                   <p className="mt-1 text-xs text-[var(--dim)]">
-                    比較モード：左のチェックで比べるイベントを選択（売上があるイベントのみ選択できます。入りたては売上があるイベントの上位{compareAutoCount}件が自動選択）。検索・絞り込みを変えると自動チェックも追随します。
+                    比較モード：イベント一覧の左にあるチェックで比べるイベントを選択出来ます。（検索条件の上位{compareAutoCount}件が自動選択されています）
                   </p>
                 )}
 
@@ -502,7 +519,7 @@ export function App() {
                   <div
                     role="group"
                     aria-label="データ管理の内訳"
-                    className="mb-4 grid grid-cols-2 overflow-hidden rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)]"
+                    className="mb-4 grid grid-cols-3 overflow-hidden rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)]"
                   >
                     {DATA_SUB_TABS.map((t) => (
                       <button
@@ -522,53 +539,67 @@ export function App() {
                   </div>
                   {dataSubTab === "products" ? (
                     <ProductAdminSections />
-                  ) : (
+                  ) : dataSubTab === "events" ? (
                     <>
-                    <section
-                      aria-labelledby="dt-new-event"
-                      className="mb-6 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] p-4"
-                    >
-                      <h2 id="dt-new-event" className="font-ledger text-base font-bold">
-                        イベントを新規登録
+                    {/* イベントの登録グループ: 新規登録・未登録チェック・
+                        イベント登録CSVを取り込む の3セクションを
+                        ひとつの外枠で囲う。種別関係の2セクションは
+                        枠の外に置く。 */}
+                    <div className="mb-6 rounded-[var(--radius)] border border-[var(--border)] p-3 sm:p-4">
+                      <h2 className="font-ledger mb-3 text-base font-bold">
+                        イベントの登録
                       </h2>
-                      <p className="mt-1 mb-3 text-sm text-[var(--dim)]">
-                        売上データのない日でも先に登録できます。
-                      </p>
-                      <NewEventSection onOpenDay={openLedgerDay} />
-                    </section>
-                    <section
-                      aria-labelledby="dt-unregistered"
-                      className="mb-6 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] p-4"
-                    >
-                      <h2 id="dt-unregistered" className="font-ledger text-base font-bold">
-                        イベント未登録チェック
-                      </h2>
-                      <p className="mt-1 mb-3 text-sm text-[var(--dim)]">
-                        未登録の日をまとめて確認できます。未登録の日は都市別・頒布物別の集計に入りません。
-                      </p>
-                      <UnregisteredView days={data.days} />
-                    </section>
+                      <div className="grid gap-4">
+                      <section
+                        aria-labelledby="dt-new-event"
+                        className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] p-4"
+                      >
+                        <h3 id="dt-new-event" className="font-ledger text-base font-bold">
+                          イベントを新規登録
+                        </h3>
+                        <p className="mt-1 mb-3 text-sm text-[var(--dim)]">
+                          売上データのない日でも先に登録できます。
+                        </p>
+                        <NewEventSection onOpenDay={openLedgerDay} />
+                      </section>
+                      <section
+                        aria-labelledby="dt-unregistered"
+                        className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] p-4"
+                      >
+                        <h3 id="dt-unregistered" className="font-ledger text-base font-bold">
+                          イベント未登録チェック
+                        </h3>
+                        <p className="mt-1 mb-3 text-sm text-[var(--dim)]">
+                          未登録の日をまとめて確認できます。未登録の日は都市別・頒布物別の集計に入りません。
+                        </p>
+                        <UnregisteredView days={data.days} />
+                      </section>
+                      <EventCsvImportSection />
+                      </div>
+                    </div>
                     <div className="grid gap-6">
                       <EventTypeSection days={data.days} />
                       <EventTypeManageSection days={data.days} />
                     </div>
                     </>
+                  ) : (
+                    /* 総合管理: 標準イベント一覧の差し替え /
+                       データのエクスポート / テスト用データとリセット */
+                    <div className="grid gap-6">
+                      <MasterReplaceSection />
+                      <DataExportSection />
+                      <DataResetSection />
+                    </div>
                   )}
-                  {/* データのエクスポート and テスト用データとリセット
-                      sit at the very bottom of the データ管理 tab,
-                      below both sub-tabs. */}
-                  <div className="mt-6">
-                    <DataExportSection />
-                  </div>
-                  <div className="mt-6">
-                    <DataResetSection />
-                  </div>
                 </section>
               )}
             </div>
 
             {/* Dedicated views reached from the top-right buttons.
                 Not tabs, so no tabpanel role — plain regions. */}
+            <div role="region" aria-label="使い方" hidden={view !== "help"}>
+              {view === "help" && <HelpView />}
+            </div>
             <div role="region" aria-label="設定" hidden={view !== "settings"}>
               {view === "settings" && (
                 <div className="grid gap-4">
@@ -578,8 +609,8 @@ export function App() {
                 </div>
               )}
             </div>
-            <div role="region" aria-label="CSV取込" hidden={view !== "csv"}>
-              {view === "csv" && <CsvImportView />}
+            <div role="region" aria-label="売上を取り込む" hidden={view !== "csv"}>
+              {view === "csv" && <CsvImportView onOpenExport={openExportSection} />}
             </div>
           </>
         )}
