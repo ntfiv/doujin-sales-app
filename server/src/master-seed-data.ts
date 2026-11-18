@@ -1,17 +1,15 @@
 // Standard event master list (候補リスト), generated from
-// ~/workspace/doujin-sales/events-master.csv (1,305 rows,
+// ~/workspace/doujin-sales/events-master.csv (1,306 rows,
 // date,event_name,venue,prefecture,city,note — note is the
 // 「出典:URL」 citation). Reference-only data: these rows live in
 // the master_events table and are NEVER written into the events
 // table (participation records) — they only appear as selectable
 // candidates in the event form / unregistered check.
 // Updated 2026-11-17: replaced wholesale with the GitHub-published
-// master (ntfiv/doujin-event-master, v1.1.0; 1,233 -> 1,305 rows —
-// the delta is the completed ZINEフェス block (83 -> 155 rows:
-// 2022-23 editions filled in from the organiser's note archive and
-// official Instagram, plus new cities), 3 venue completions, and
-// the 吉祥寺ZINEフェスティバル date correction
-// (2024-11-02 -> 2024-11-03, postponed for rain).
+// master (ntfiv/doujin-event-master, v1.1.1; 1,305 -> 1,306 rows —
+// the delta is one added row: the postponed 【延期】ZINEフェス沖縄
+// (2024-04-06, 第一牧志公設市場, 那覇市), whose replacement date
+// could not be confirmed in the organiser's magazine).
 export const SEED_MASTER_EVENTS: {
   date: string;
   eventName: string;
@@ -938,6 +936,7 @@ export const SEED_MASTER_EVENTS: {
   {"date": "2026-11-29", "eventName": "ZINEフェス高知", "venue": "高知市文化プラザかるぽーと", "prefecture": "高知県", "city": "高知市", "note": "出典:https://note.com/bookcultureclub/n/n300c680b84a6"},
   {"date": "2026-01-24", "eventName": "ZINEフェス山梨", "venue": "やまなしプラザ", "prefecture": "山梨県", "city": "甲府市", "note": "出典:https://note.com/bookcultureclub/n/nf6469a7f5322"},
   {"date": "2026-09-06", "eventName": "ZINEフェス山梨", "venue": "やまなしプラザ", "prefecture": "山梨県", "city": "甲府市", "note": "出典:https://www.instagram.com/zinefarmtokyo/"},
+  {"date": "2024-04-06", "eventName": "【延期】ZINEフェス沖縄", "venue": "第一牧志公設市場", "prefecture": "沖縄県", "city": "那覇市", "note": "開催延期（2024年4月3日に延期が告知された。振替日はマガジン内で確認できず） 出典:https://note.com/bookcultureclub/n/n675f29066d94"},
   {"date": "2026-01-31", "eventName": "ZINEフェス沖縄", "venue": "", "prefecture": "沖縄県", "city": "", "note": "会場・市区町村未確認 出典:https://note.com/bookcultureclub/n/n14764ff42f86"},
   {"date": "2026-06-21", "eventName": "ZINEフェス沖縄", "venue": "沖縄県市町村自治会館", "prefecture": "沖縄県", "city": "那覇市", "note": "出典:https://note.com/bookcultureclub/n/n1b55194a83ee"},
   {"date": "2027-02-20", "eventName": "ZINEフェス沖縄", "venue": "沖縄県市町村自治会館", "prefecture": "沖縄県", "city": "那覇市", "note": "出典:https://note.com/bookcultureclub/n/n399901fb69e1"},

@@ -1,4 +1,4 @@
-// Actions for 同人誌売上管理 (doujin sales ledger).
+// Actions for 同人誌売上管理 for Muse Spaces (doujin sales ledger).
 //
 // Sales are stored only as (date, product) aggregates parsed from Square
 // exports. Raw transaction identifiers (order IDs, payment IDs, customer
@@ -103,9 +103,9 @@ const eventTypeValue = z.string().max(100);
 // existing manual settings and automatic results are unchanged.
 // The five added in 2026-11-16 (designfesta / zinefes / comiccity /
 // sunshine / techbook) cover the remaining systems of the standard
-// event master list (events-master.csv, 1,305 rows): classifying
+// event master list (events-master.csv, 1,306 rows): classifying
 // every master event name with this list lands each name in its own
-// system (238 / 373 / 127 / 130 / 154 / 80 / 83 / 54 / 43 / 22; the
+// system (238 / 373 / 127 / 130 / 155 / 80 / 83 / 54 / 43 / 22; the
 // one exception is ZINE PARK渋谷 — ZINEフェス's sister brand, whose
 // name carries no type keyword, so it falls through to その他）. List order is the classification
 // priority for the keyword walk; 「その他」 (key "other", no
@@ -2830,7 +2830,7 @@ export const Actions = {
 
   seedMasterEvents: defineAction({
     description:
-      "One-time seed: inserts the standard event master list (1,305 rows prepared from events-master.csv) into the reference-only master_events table, only when that table is empty. Master rows are candidates for the event form — they are never written into the events (participation) table and never overwrite a user registration; safe to run more than once.",
+      "One-time seed: inserts the standard event master list (1,306 rows prepared from events-master.csv) into the reference-only master_events table, only when that table is empty. Master rows are candidates for the event form — they are never written into the events (participation) table and never overwrite a user registration; safe to run more than once.",
     request: z.object({}),
     response: z.object({ seeded: z.boolean(), rows: z.number() }),
     handler: async (ctx): Promise<{ seeded: boolean; rows: number }> => {
@@ -2890,7 +2890,7 @@ export const Actions = {
 
   replaceMasterEventsFromSeed: defineAction({
     description:
-      "Replaces the standard event master list wholesale with the bundled seed (1,305 rows from the GitHub-published events-master.csv v1.1.0, including the 【中止】 cancelled editions, デザインフェスタ vol.65, and the completed ZINEフェス block) — delete-all then insert, in one batch. Used when a revised master CSV has been folded into the seed. Reference-only: the events (participation) table and every count derived from it are untouched.",
+      "Replaces the standard event master list wholesale with the bundled seed (1,306 rows from the GitHub-published events-master.csv v1.1.1, including the 【中止】 cancelled editions, the 【延期】 postponed ZINEフェス沖縄， デザインフェスタ vol.65, and the completed ZINEフェス block) — delete-all then insert, in one batch. Used when a revised master CSV has been folded into the seed. Reference-only: the events (participation) table and every count derived from it are untouched.",
     request: z.object({}),
     response: z.object({ replaced: z.number() }),
     handler: async (ctx): Promise<{ replaced: number }> => {

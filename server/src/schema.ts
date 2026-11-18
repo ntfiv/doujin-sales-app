@@ -1,4 +1,4 @@
-// Schema for 同人誌売上管理 (doujin sales ledger).
+// Schema for 同人誌売上管理 for Muse Spaces (doujin sales ledger).
 //
 // Two tables:
 //   sales  — Square sales aggregated to (date, product). Privacy by design:
@@ -162,7 +162,7 @@ export const dayFlags = sqliteTable("day_flags", {
 });
 
 // Standard event master list (標準イベント一覧・マスター), seeded once
-// from the prepared events-master.csv (1,305 rows) and replaceable
+// from the prepared events-master.csv (1,306 rows) and replaceable
 // wholesale from the CSV取込 screen. REFERENCE ONLY: these rows are
 // candidates shown in the event registration / edit form and in the
 // unregistered-days check. They are never participation records —

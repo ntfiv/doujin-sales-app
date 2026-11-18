@@ -1,7 +1,7 @@
 {
   "entry": "client/dist/index.html",
   "managedCronJobs": [],
-  "name": "同人誌売上管理",
+  "name": "同人誌売上管理 for Muse Spaces",
   "platformVersion": 29,
   "runtime": "typescript",
   "slug": "tong-ren-zhi-mai-shang-guan-li"
