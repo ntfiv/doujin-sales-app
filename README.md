@@ -10,11 +10,11 @@
 <img src="docs/images/screenshot-day-detail.png" alt="イベントの日の詳細（頒布物の内訳）" width="49%">
 </p>
 <p>
-<img src="docs/images/screenshot-products.png" alt="頒布物一覧と頒布物の詳細" width="49%">
 <img src="docs/images/screenshot-compare.png" alt="過去の頒布数を比較" width="49%">
+<img src="docs/images/screenshot-events-filter.png" alt="イベント一覧の絞り込み（文学フリマ系・大阪府）" width="49%">
 </p>
 <p>
-<img src="docs/images/screenshot-events-filter.png" alt="イベント一覧の絞り込み（文学フリマ系・大阪府）" width="49%">
+<img src="docs/images/screenshot-products.png" alt="頒布物一覧と頒布物の詳細" width="49%">
 </p>
 
 ※金額と冊数は、アプリのスクリーンショットモードで伏せて表示しています。
