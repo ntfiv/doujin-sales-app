@@ -36,6 +36,11 @@
   /* 「同県で初頒布」バッジ: 控えめな薄い青系 (pale blue bg, moderate blue text) */
   --first-bg: #dfeaf4;
   --first-text: #3d6b99;
+  /* チケット状態・チェック状況バッジ: はっきり目立つ青のベタ塗り＋白文字
+     （「同県で初頒布」の薄い青とは別物）。未了項目の略号は半透明の白。 */
+  --prep-bg: #1d6fd1;
+  --prep-text: #ffffff;
+  --prep-dim: rgb(255 255 255 / 0.55);
   /* イベント一覧の日内訳に出る「廃盤」バッジ: 目立つ黒寄りグレー
      (near-black gray bg, white text). 頒布物一覧側の薄いバッジとは別。 */
   --disc-bg: #33302b;
@@ -75,6 +80,11 @@
     --accent-soft: #452a24;
     --first-bg: #26394c;
     --first-text: #a8c8e8;
+    /* チケット状態・チェック状況バッジ（ダーク）: 青のベタ塗り＋白文字。
+       暗い背景でも沈まないよう、ライトより少し明るい青にする。 */
+    --prep-bg: #2b7fe0;
+    --prep-text: #ffffff;
+    --prep-dim: rgb(255 255 255 / 0.55);
     /* Dark mode: a near-black badge would vanish on the dark surface,
        so invert to a light gray bg with dark text — still prominent. */
     --disc-bg: #d9d2c2;

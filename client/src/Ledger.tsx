@@ -940,6 +940,76 @@ export function InventoryMemoBadge({ totalQty }: { totalQty: number }) {
   );
 }
 
+/**
+ * チケット形式の選択肢 (event_prep.ticket_type の値 → 表示名).
+ * "" is 未選択 and has no entry here.
+ */
+export const TICKET_TYPE_OPTIONS: { value: string; label: string }[] = [
+  { value: "paper_arrived", label: "紙チケット（届いた）" },
+  { value: "paper_pending", label: "紙チケット（まだ届いてない）" },
+  { value: "electronic", label: "電子チケット" },
+  { value: "none", label: "チケット不要" },
+];
+
+export function ticketTypeLabel(value: string | null | undefined): string | null {
+  if (!value) return null;
+  return TICKET_TYPE_OPTIONS.find((o) => o.value === value)?.label ?? null;
+}
+
+/**
+ * Ticket-status chip for a ledger row. The caller gates it to
+ * upcoming days (today or later, Asia/Tokyo) with a ticket format
+ * set; past days never show it.
+ */
+export function TicketBadge({ ticketType }: { ticketType: string | null }) {
+  const label = ticketTypeLabel(ticketType);
+  if (!label) return null;
+  return (
+    <span className="inline-block rounded-full bg-[var(--prep-bg)] px-2 py-0.5 text-[11px] font-bold whitespace-nowrap text-[var(--prep-text)]">
+      {label}
+    </span>
+  );
+}
+
+/**
+ * 参加前確認のチェック状況 chip for a ledger row: the four departure
+ * checks as one compact badge — 品 (POP/お品書き)・告 （参加告知）・
+ * チケ (チケットOK)・荷 (荷造りOK) — each prefixed with ✅ when
+ * done, and shown pale without it when not. The caller gates it to
+ * upcoming days (today or later, Asia/Tokyo) that have a prep
+ * record; past days never show it. The guide-by-mail flag is NOT
+ * part of this badge.
+ */
+export function PrepChecksBadge({
+  checks,
+}: {
+  checks: { pop: boolean; announce: boolean; ticket: boolean; packing: boolean } | null;
+}) {
+  if (!checks) return null;
+  const items: { label: string; done: boolean }[] = [
+    { label: "品", done: checks.pop },
+    { label: "告", done: checks.announce },
+    { label: "チケ", done: checks.ticket },
+    { label: "荷", done: checks.packing },
+  ];
+  return (
+    <span
+      aria-label="参加前確認のチェック状況"
+      className="inline-block rounded-full bg-[var(--prep-bg)] px-2 py-0.5 text-[11px] font-bold whitespace-nowrap text-[var(--prep-text)]"
+    >
+      {items.map((it, i) => (
+        <span key={it.label}>
+          {i > 0 && <span aria-hidden>・</span>}
+          <span style={it.done ? undefined : { color: "var(--prep-dim)" }}>
+            {it.done ? "✅" : ""}
+            {it.label}
+          </span>
+        </span>
+      ))}
+    </span>
+  );
+}
+
 /** Payload of one イベントメモ save (what saveInventoryMemo stores). */
 type MemoPayload = {
   url: string;
@@ -1463,6 +1533,552 @@ function InventoryMemoEditor({
   );
 }
 
+type TicketTypeValue = "" | "paper_arrived" | "paper_pending" | "electronic" | "none";
+
+function toTicketTypeValue(v: string): TicketTypeValue {
+  return v === "paper_arrived" ||
+    v === "paper_pending" ||
+    v === "electronic" ||
+    v === "none"
+    ? v
+    : "";
+}
+
+/** Payload of one 参加前確認 save (what saveEventPrep stores). */
+type PrepPayload = {
+  checkPop: boolean;
+  checkAnnounce: boolean;
+  checkTicket: boolean;
+  checkPacking: boolean;
+  entryTime: string;
+  startTime: string;
+  endTime: string;
+  space: string;
+  venue: string;
+  ticketType: TicketTypeValue;
+  guideUrl: string;
+  guideByMail: boolean;
+};
+
+function prepPayloadKey(p: PrepPayload): string {
+  return JSON.stringify([
+    p.checkPop,
+    p.checkAnnounce,
+    p.checkTicket,
+    p.checkPacking,
+    p.entryTime,
+    p.startTime,
+    p.endTime,
+    p.space,
+    p.venue,
+    p.ticketType,
+    p.guideUrl,
+    p.guideByMail,
+  ]);
+}
+
+/** 「11:00〜16:00」 form for the recorded hours; either side may be blank. */
+function prepTimeRange(startTime: string, endTime: string): string | null {
+  if (!startTime && !endTime) return null;
+  return `${startTime}〜${endTime}`;
+}
+
+/**
+ * 参加前確認 editor, shown in the day detail ABOVE the sales record
+ * while the date is today or later (Asia/Tokyo). Small type
+ * throughout, per the user's request. One row of four departure
+ * checkboxes (POP/お品書き・参加告知・チケットOK・荷造りOK), then
+ * a row with the entry start time (入場開始時間）, the event's
+ * hours, and the circle's space number; the ticket-format row below
+ * also carries the 場所 input — a prep-side override that never
+ * touches the event registration: while it is empty the
+ * registration's venue shows as the placeholder, and a typed value
+ * wins over it everywhere the venue is displayed. One guide URL
+ * (PDF etc.), which renders as a link once it is a valid http/https
+ * URL, with a 「メールで来た」 check at the left of its row.
+ *
+ * Autosave like the イベントメモ editor: no save button. Checks
+ * and the ticket select save immediately; text / time / URL fields
+ * save about a second after input settles. While the typed guide
+ * URL is not a valid http/https URL yet, only the URL is held back
+ * (the payload keeps the last saved URL and a note shows under the
+ * field); everything else still saves.
+ */
+function PrepSection({
+  date,
+  venue,
+  prefecture,
+  city,
+  initial,
+}: {
+  date: string;
+  venue: string;
+  prefecture: string;
+  city: string;
+  initial: DayDetail["prep"];
+}) {
+  const queryClient = useQueryClient();
+  const [checkPop, setCheckPop] = useState(initial?.checkPop ?? false);
+  const [checkAnnounce, setCheckAnnounce] = useState(initial?.checkAnnounce ?? false);
+  const [checkTicket, setCheckTicket] = useState(initial?.checkTicket ?? false);
+  const [checkPacking, setCheckPacking] = useState(initial?.checkPacking ?? false);
+  const [entryTime, setEntryTime] = useState(initial?.entryTime ?? "");
+  const [startTime, setStartTime] = useState(initial?.startTime ?? "");
+  const [endTime, setEndTime] = useState(initial?.endTime ?? "");
+  const [space, setSpace] = useState(initial?.space ?? "");
+  const [prepVenue, setPrepVenue] = useState(initial?.venue ?? "");
+  const [ticketType, setTicketType] = useState<TicketTypeValue>(() =>
+    toTicketTypeValue(initial?.ticketType ?? ""),
+  );
+  const [guideUrl, setGuideUrl] = useState(initial?.guideUrl ?? "");
+  const [guideByMail, setGuideByMail] = useState(initial?.guideByMail ?? false);
+  const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState<
+    "idle" | "unsaved" | "saving" | "saved" | "error"
+  >("idle");
+
+  const valuesRef = useRef<PrepPayload>({
+    checkPop,
+    checkAnnounce,
+    checkTicket,
+    checkPacking,
+    entryTime,
+    startTime,
+    endTime,
+    space,
+    venue: prepVenue,
+    ticketType,
+    guideUrl,
+    guideByMail,
+  });
+  valuesRef.current = {
+    checkPop,
+    checkAnnounce,
+    checkTicket,
+    checkPacking,
+    entryTime,
+    startTime,
+    endTime,
+    space,
+    venue: prepVenue,
+    ticketType,
+    guideUrl,
+    guideByMail,
+  };
+  const savedRef = useRef<PrepPayload>({
+    checkPop: initial?.checkPop ?? false,
+    checkAnnounce: initial?.checkAnnounce ?? false,
+    checkTicket: initial?.checkTicket ?? false,
+    checkPacking: initial?.checkPacking ?? false,
+    entryTime: initial?.entryTime ?? "",
+    startTime: initial?.startTime ?? "",
+    endTime: initial?.endTime ?? "",
+    space: initial?.space ?? "",
+    venue: initial?.venue ?? "",
+    ticketType: toTicketTypeValue(initial?.ticketType ?? ""),
+    guideUrl: initial?.guideUrl ?? "",
+    guideByMail: initial?.guideByMail ?? false,
+  });
+  const timerRef = useRef<number | null>(null);
+  const chainRef = useRef<Promise<unknown>>(Promise.resolve());
+
+  const invalidate = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: ["overview"] });
+    void queryClient.invalidateQueries({ queryKey: ["day", date] });
+  }, [queryClient, date]);
+
+  const runSave = useCallback((): Promise<boolean> => {
+    const task = async (): Promise<boolean> => {
+      for (let pass = 0; pass < 5; pass++) {
+        const cur = valuesRef.current;
+        const urlState = memoUrlState(cur.guideUrl);
+        const payload: PrepPayload = {
+          ...cur,
+          space: cur.space.trim(),
+          venue: cur.venue.trim(),
+          guideUrl: urlState.valid ? urlState.trimmed : savedRef.current.guideUrl,
+        };
+        if (prepPayloadKey(payload) === prepPayloadKey(savedRef.current)) {
+          setError(null);
+          setStatus("saved");
+          return true;
+        }
+        setStatus("saving");
+        try {
+          await api.saveEventPrep({ date, ...payload });
+        } catch (e) {
+          setStatus("error");
+          setError(`保存できませんでした：${String(e)}`);
+          return false;
+        }
+        savedRef.current = payload;
+        setError(null);
+        setStatus("saved");
+        invalidate();
+      }
+      return true;
+    };
+    const p = chainRef.current.then(task, task);
+    chainRef.current = p.then(
+      () => undefined,
+      () => undefined,
+    );
+    return p;
+  }, [date, invalidate]);
+
+  // Debounced autosave for the text / time / URL fields (the first
+  // render is skipped — merely opening the detail saves nothing).
+  const firstRenderRef = useRef(true);
+  useEffect(() => {
+    if (firstRenderRef.current) {
+      firstRenderRef.current = false;
+      return;
+    }
+    setStatus((s) => (s === "saving" ? s : "unsaved"));
+    if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    timerRef.current = window.setTimeout(() => {
+      timerRef.current = null;
+      void runSave();
+    }, 1000);
+    return () => {
+      if (timerRef.current !== null) {
+        window.clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+    };
+  }, [entryTime, startTime, endTime, space, prepVenue, guideUrl, runSave]);
+
+  // Checks and the ticket select save immediately: update the ref
+  // synchronously so the save reads the new value, cancel any
+  // pending debounce, and save now.
+  const saveNow = (patch: Partial<PrepPayload>) => {
+    valuesRef.current = { ...valuesRef.current, ...patch };
+    if (timerRef.current !== null) {
+      window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    void runSave();
+  };
+
+  const urlInvalidNow = !memoUrlState(guideUrl).valid;
+  const linkUrl = (() => {
+    const s = memoUrlState(guideUrl);
+    return s.valid && s.trimmed !== "" ? s.trimmed : null;
+  })();
+
+  const smallInputCls =
+    "rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-2 py-1.5 text-sm text-[var(--text)]";
+
+  return (
+    <section
+      aria-label="参加前確認"
+      className="mt-3 rounded-[var(--radius)] border border-[var(--border)] px-3 py-2.5"
+    >
+      <h3 className="font-ledger text-sm font-bold">参加前確認</h3>
+      <div className="mt-2 grid gap-2">
+        {/* The four checks stay on ONE line even at phone widths
+            (user request): text-xs, tight gaps, no wrapping. */}
+        <div className="flex flex-nowrap gap-x-3" role="group" aria-label="出発前チェック">
+          <label className="flex items-center gap-1 text-xs whitespace-nowrap">
+            <input
+              type="checkbox"
+              checked={checkPop}
+              onChange={(e) => {
+                setCheckPop(e.target.checked);
+                saveNow({ checkPop: e.target.checked });
+              }}
+              className="h-4 w-4 shrink-0"
+              style={{ accentColor: "var(--accent)" }}
+            />
+            POP/お品書き
+          </label>
+          <label className="flex items-center gap-1 text-xs whitespace-nowrap">
+            <input
+              type="checkbox"
+              checked={checkAnnounce}
+              onChange={(e) => {
+                setCheckAnnounce(e.target.checked);
+                saveNow({ checkAnnounce: e.target.checked });
+              }}
+              className="h-4 w-4 shrink-0"
+              style={{ accentColor: "var(--accent)" }}
+            />
+            参加告知
+          </label>
+          <label className="flex items-center gap-1 text-xs whitespace-nowrap">
+            <input
+              type="checkbox"
+              checked={checkTicket}
+              onChange={(e) => {
+                setCheckTicket(e.target.checked);
+                saveNow({ checkTicket: e.target.checked });
+              }}
+              className="h-4 w-4 shrink-0"
+              style={{ accentColor: "var(--accent)" }}
+            />
+            チケットOK
+          </label>
+          <label className="flex items-center gap-1 text-xs whitespace-nowrap">
+            <input
+              type="checkbox"
+              checked={checkPacking}
+              onChange={(e) => {
+                setCheckPacking(e.target.checked);
+                saveNow({ checkPacking: e.target.checked });
+              }}
+              className="h-4 w-4 shrink-0"
+              style={{ accentColor: "var(--accent)" }}
+            />
+            荷造りOK
+          </label>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+          <span className="flex items-center gap-1">
+            <span className="text-xs text-[var(--dim)]">入場開始</span>
+            <input
+              type="time"
+              step={600}
+              aria-label="入場開始時間"
+              value={entryTime}
+              onChange={(e) => setEntryTime(e.target.value)}
+              className={smallInputCls}
+            />
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="text-xs text-[var(--dim)]">開催時間</span>
+            <input
+              type="time"
+              step={600}
+              aria-label="開始時刻"
+              value={startTime}
+              onChange={(e) => setStartTime(e.target.value)}
+              className={smallInputCls}
+            />
+            <span className="text-sm text-[var(--dim)]">〜</span>
+            <input
+              type="time"
+              step={600}
+              aria-label="終了時刻"
+              value={endTime}
+              onChange={(e) => setEndTime(e.target.value)}
+              className={smallInputCls}
+            />
+          </span>
+          <label className="flex items-center gap-1">
+            <span className="text-xs text-[var(--dim)]">スペース</span>
+            <input
+              {...FIELDS.saveEventPrep.space}
+              type="text"
+              aria-label="スペース番号"
+              value={space}
+              onChange={(e) => setSpace(e.target.value)}
+              placeholder="例：15B"
+              className={`${smallInputCls} w-24`}
+            />
+          </label>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <label htmlFor={`prep-ticket-${date}`} className="text-xs text-[var(--dim)]">
+            チケット
+          </label>
+          <div className="relative">
+            <select
+              id={`prep-ticket-${date}`}
+              value={ticketType}
+              onChange={(e) => {
+                const v = toTicketTypeValue(e.target.value);
+                setTicketType(v);
+                saveNow({ ticketType: v });
+              }}
+              className={`${smallInputCls} appearance-none pr-8`}
+            >
+              <option value="">未選択</option>
+              {TICKET_TYPE_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+            <span
+              aria-hidden
+              className="pointer-events-none absolute top-1/2 right-2.5 -translate-y-1/2 text-xs text-[var(--dim)]"
+            >
+              ▼
+            </span>
+          </div>
+          <label className="flex items-center gap-1">
+            <span className="text-xs text-[var(--dim)]">場所</span>
+            <input
+              {...FIELDS.saveEventPrep.venue}
+              type="text"
+              aria-label="場所"
+              value={prepVenue}
+              onChange={(e) => setPrepVenue(e.target.value)}
+              placeholder={venue || "場所"}
+              className={`${smallInputCls} w-40`}
+            />
+          </label>
+          {/* MAP: opens Google Maps in a new tab searching for the
+              displayed venue (prep-side input wins, else the event
+              registration's venue), with the day's prefecture and
+              city in the query to avoid same-name mix-ups. Hidden
+              while no venue is available at all. */}
+          {(() => {
+            const mapVenue = prepVenue.trim() || venue.trim();
+            if (!mapVenue) return null;
+            const query = [prefecture.trim(), city.trim(), mapVenue]
+              .filter(Boolean)
+              .join(" ");
+            return (
+              <a
+                href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`}
+                target="_blank"
+                rel="noreferrer"
+                aria-label={`Googleマップで「${mapVenue}」を開く`}
+                className={`${smallInputCls} shrink-0 font-medium no-underline`}
+              >
+                MAP
+              </a>
+            );
+          })()}
+        </div>
+
+        <div>
+          <label htmlFor={`prep-guide-${date}`} className={labelCls}>
+            案内URL（PDFなど）
+          </label>
+          <div className="flex items-center gap-2">
+            <label className="flex shrink-0 items-center gap-1 text-xs whitespace-nowrap">
+              <input
+                type="checkbox"
+                checked={guideByMail}
+                onChange={(e) => {
+                  setGuideByMail(e.target.checked);
+                  saveNow({ guideByMail: e.target.checked });
+                }}
+                className="h-4 w-4 shrink-0"
+                style={{ accentColor: "var(--accent)" }}
+              />
+              メールで来た
+            </label>
+            <input
+              {...FIELDS.saveEventPrep.guideUrl}
+              id={`prep-guide-${date}`}
+              type="url"
+              inputMode="url"
+              value={guideUrl}
+              aria-invalid={urlInvalidNow || undefined}
+              onChange={(e) => setGuideUrl(e.target.value)}
+              placeholder="https://…"
+              className={`${smallInputCls} min-w-0 flex-1`}
+            />
+          </div>
+          {urlInvalidNow ? (
+            <p className="mt-1 text-xs text-[var(--accent)]">
+              URLの形式が正しくないため、このURLはまだ保存されていません（他の項目は自動で保存されます）。
+            </p>
+          ) : linkUrl ? (
+            <p className="mt-1 text-xs">
+              <a
+                href={linkUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="break-all text-[var(--ai)] underline"
+              >
+                {linkUrl}
+              </a>
+            </p>
+          ) : null}
+        </div>
+      </div>
+
+      {error && (
+        <p role="alert" className="mt-2 text-xs text-[var(--accent)]">
+          {error}
+        </p>
+      )}
+      <p role="status" aria-live="polite" className="mt-1.5 text-right text-xs text-[var(--dim)]">
+        {status === "unsaved" && "未保存の変更があります"}
+        {status === "saving" && "保存中…"}
+        {status === "saved" && "保存しました"}
+        {status === "error" && (
+          <span className="font-medium text-[var(--accent)]">保存できませんでした</span>
+        )}
+      </p>
+    </section>
+  );
+}
+
+/**
+ * Read-only 参加前確認 summary archived at the TOP of the
+ * イベントメモ body once the date has passed: only the items that
+ * were actually recorded (check state, hours, venue, space, ticket
+ * format, guide link). Renders nothing when nothing was recorded.
+ */
+function PrepArchive({
+  prep,
+  venue,
+}: {
+  prep: NonNullable<DayDetail["prep"]>;
+  venue: string;
+}) {
+  const timeRange = prepTimeRange(prep.startTime, prep.endTime);
+  const ticketLabel = ticketTypeLabel(prep.ticketType);
+  const guideLink = (() => {
+    if (!prep.guideUrl) return null;
+    try {
+      const u = new URL(prep.guideUrl);
+      return u.protocol === "http:" || u.protocol === "https:" ? prep.guideUrl : null;
+    } catch {
+      return null;
+    }
+  })();
+  const anyCheck =
+    prep.checkPop || prep.checkAnnounce || prep.checkTicket || prep.checkPacking;
+  const checkMark = (done: boolean) => (done ? "✓" : "―");
+  // The prep-side venue wins over the event registration's venue,
+  // same priority as in the editor.
+  const displayVenue = prep.venue || venue;
+  return (
+    <div className="mb-2 border-b border-dashed border-[var(--border)] pb-2 text-xs">
+      <p className="font-bold">参加前確認</p>
+      {anyCheck && (
+        <p className="mt-0.5">
+          出発前チェック：POP/お品書き {checkMark(prep.checkPop)}・参加告知{" "}
+          {checkMark(prep.checkAnnounce)}・チケットOK {checkMark(prep.checkTicket)}
+          ・荷造りOK {checkMark(prep.checkPacking)}
+        </p>
+      )}
+      {(prep.entryTime || timeRange) && (
+        <p className="mt-0.5">
+          {prep.entryTime && <>入場開始：{prep.entryTime}</>}
+          {prep.entryTime && timeRange && "／"}
+          {timeRange && <>開催時間：{timeRange}</>}
+        </p>
+      )}
+      {displayVenue && <p className="mt-0.5">場所：{displayVenue}</p>}
+      {prep.space && <p className="mt-0.5">スペース：{prep.space}</p>}
+      {ticketLabel && <p className="mt-0.5">チケット：{ticketLabel}</p>}
+      {guideLink && (
+        <p className="mt-0.5">
+          案内{prep.guideByMail ? "（メールで来た）" : ""}：
+          <a
+            href={guideLink}
+            target="_blank"
+            rel="noreferrer"
+            className="break-all text-[var(--ai)] underline"
+          >
+            {guideLink}
+          </a>
+        </p>
+      )}
+      {!guideLink && prep.guideByMail && <p className="mt-0.5">案内：メールで来た</p>}
+    </div>
+  );
+}
+
 /**
  * Read-only イベントメモ section inside the day detail: the saved URL as
  * a tappable link, the per-product counts with their total, and the
@@ -1481,11 +2097,17 @@ function InventoryMemoSection({
   eventName,
   memo,
   hasSales,
+  prep,
+  venue,
 }: {
   date: string;
   eventName: string;
   memo: DayDetail["inventoryMemo"];
   hasSales: boolean;
+  /** 参加前確認 for this date; archived read-only at the top of
+   * this section once the date has passed (see showArchive). */
+  prep: DayDetail["prep"];
+  venue: string;
 }) {
   const masked = useMasked();
   const [editing, setEditing] = useState(false);
@@ -1520,6 +2142,11 @@ function InventoryMemoSection({
     () => closeGuardRef.current?.veto() ?? false,
     [],
   );
+  // 参加前確認の収納表示： once the date is in the past (Asia/Tokyo),
+  // the recorded prep is archived read-only at the top of this
+  // section. Upcoming days show the editable PrepSection above the
+  // sales record instead, so nothing is archived for them here.
+  const showArchive = prep !== null && date < todayInTokyo();
   // Only http/https URLs ever reach storage (enforced on save), but
   // render as a link only when the stored value still parses as one.
   const linkUrl = (() => {
@@ -1577,9 +2204,10 @@ function InventoryMemoSection({
            the boundary felt like it closed the frame). */
         <div
           id={`inventory-memo-body-${date}`}
-          className={memo ? "mt-2 px-4 py-3" : undefined}
+          className={memo || showArchive ? "mt-2 px-4 py-3" : undefined}
           onClick={(e) => e.stopPropagation()}
         >
+          {showArchive && prep && <PrepArchive prep={prep} venue={venue} />}
           {memo ? (
         <div className="grid grid-cols-[minmax(0,1fr)] gap-2 text-sm">
           {linkUrl && (
@@ -1711,6 +2339,20 @@ function DayDetailView({ date }: { date: string }) {
         </p>
       )}
 
+      {/* 参加前確認： while the date is today or later (Asia/Tokyo)
+          it sits editable above the sales record; once the date
+          has passed it is archived at the top of the イベントメモ
+          section below instead. */}
+      {date >= todayInTokyo() && (
+        <PrepSection
+          date={date}
+          venue={data.event?.venue ?? ""}
+          prefecture={data.event?.prefecture ?? ""}
+          city={data.event?.city ?? ""}
+          initial={data.prep}
+        />
+      )}
+
       {data.rows.length === 0 ? (
         <p className="mt-3 text-sm text-[var(--dim)]">
           この日の売上記録はまだありません。下の「売上を追加」から追加できます（各種CSV取込でも表示されます）。
@@ -1823,6 +2465,8 @@ function DayDetailView({ date }: { date: string }) {
         eventName={data.event?.eventName ?? ""}
         memo={data.inventoryMemo}
         hasSales={data.rows.length > 0}
+        prep={data.prep}
+        venue={data.event?.venue ?? ""}
       />
 
       {data.rows.length > 0 && totalNet === 0 && totalQty === 0 && (
@@ -2037,6 +2681,14 @@ export function DayRow({
                 {day.hasInventoryMemo && (
                   <InventoryMemoBadge totalQty={day.inventoryTotalQty} />
                 )}
+                {/* チケット状況バッジ: upcoming days only (the
+                    `upcoming` flag is today-or-later, Asia/Tokyo);
+                    past days never show it. TicketBadge itself
+                    renders nothing when no format is set. */}
+                {upcoming && <TicketBadge ticketType={day.ticketType} />}
+                {/* チェック状況バッジ: same gating as the ticket
+                    badge — upcoming days with a prep record only. */}
+                {upcoming && <PrepChecksBadge checks={day.prepChecks} />}
               </span>
             </>
           ) : (
@@ -2048,9 +2700,14 @@ export function DayRow({
                 )}
               </p>
               <DayFlagBadges day={day} />
-              {day.hasInventoryMemo && (
+              {(day.hasInventoryMemo ||
+                (upcoming && (day.ticketType || day.prepChecks))) && (
                 <span className="mt-1 flex flex-wrap gap-1.5">
-                  <InventoryMemoBadge totalQty={day.inventoryTotalQty} />
+                  {day.hasInventoryMemo && (
+                    <InventoryMemoBadge totalQty={day.inventoryTotalQty} />
+                  )}
+                  {upcoming && <TicketBadge ticketType={day.ticketType} />}
+                  {upcoming && <PrepChecksBadge checks={day.prepChecks} />}
                 </span>
               )}
             </>

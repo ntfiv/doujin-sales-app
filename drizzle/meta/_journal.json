@@ -106,6 +106,27 @@
       "when": 1794849333115,
       "tag": "0015_add_category_to_product_releases",
       "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "6",
+      "when": 1795244604964,
+      "tag": "0016_add_event_prep_table",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "6",
+      "when": 1795245454381,
+      "tag": "0017_add_entry_time_to_event_prep",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "6",
+      "when": 1795246477875,
+      "tag": "0018_add_prep_venue_announce_and_guide_mail",
+      "breakpoints": true
     }
   ]
 }

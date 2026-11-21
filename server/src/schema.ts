@@ -1,4 +1,4 @@
-// Schema for 同人誌売上管理 for Muse Spaces (doujin sales ledger).
+// Schema for 同人誌売上管理 (doujin sales ledger).
 //
 // Two tables:
 //   sales  — Square sales aggregated to (date, product). Privacy by design:
@@ -202,6 +202,46 @@ export const inventoryItems = sqliteTable(
   },
   (t) => [uniqueIndex("inventory_items_date_product_idx").on(t.date, t.product)],
 );
+
+// Per-date pre-event checklist （参加前確認） for upcoming events: the
+// departure checks, the event's opening hours, the circle's space
+// number, the ticket format / arrival state, and one guide URL
+// (PDF etc.). Like the inventory memos this is the user's own
+// per-date data — it is NOT part of the standard event master list
+// (master_events) and never joins into it. A row exists only while
+// it has content: saveEventPrep deletes the row when every field is
+// back to its empty value.
+//   ticketType — "" (unset) or one of "paper_arrived" （紙チケット
+//                届いた） / "paper_pending" （紙チケット まだ届いて
+//                ない） / "electronic" （電子チケット） / "none"
+//                （チケット不要）.
+//   entryTime — the 入場開始時間 (when entry / setup opens), one
+//                "HH:MM" or "" (optional).
+//   startTime / endTime — "HH:MM" or "" (either side may be set
+//                alone).
+//   venue     — the prep-side 場所 override. "" means "show the
+//               event registration's venue"; a non-empty value wins
+//               over it in the editor and in the archived summary.
+//               The events table's own venue is never changed here.
+//   checkAnnounce — the 参加告知 departure check, between
+//               POP/お品書き and チケットOK.
+//   guideByMail — 1 when the guide （案内） arrived by email; shown
+//               in the archived summary next to the guide link.
+export const eventPrep = sqliteTable("event_prep", {
+  date: text("date").primaryKey(), // YYYY-MM-DD
+  checkPop: integer("check_pop").notNull().default(0), // 0/1 POP/お品書き
+  checkAnnounce: integer("check_announce").notNull().default(0), // 0/1 参加告知
+  checkTicket: integer("check_ticket").notNull().default(0), // 0/1 チケットOK
+  checkPacking: integer("check_packing").notNull().default(0), // 0/1 荷造りOK
+  entryTime: text("entry_time").notNull().default(""), // HH:MM or ""
+  startTime: text("start_time").notNull().default(""), // HH:MM or ""
+  endTime: text("end_time").notNull().default(""), // HH:MM or ""
+  space: text("space").notNull().default(""), // スペース番号 (free text)
+  venue: text("venue").notNull().default(""), // 場所 override ("" = event venue)
+  ticketType: text("ticket_type").notNull().default(""),
+  guideUrl: text("guide_url").notNull().default(""),
+  guideByMail: integer("guide_by_mail").notNull().default(0), // 0/1 案内はメールで来た
+});
 
 export const masterEvents = sqliteTable("master_events", {
   id: integer("id").primaryKey({ autoIncrement: true }),

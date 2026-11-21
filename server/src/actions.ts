@@ -1,4 +1,4 @@
-// Actions for 同人誌売上管理 for Muse Spaces (doujin sales ledger).
+// Actions for 同人誌売上管理 (doujin sales ledger).
 //
 // Sales are stored only as (date, product) aggregates parsed from Square
 // exports. Raw transaction identifiers (order IDs, payment IDs, customer
@@ -266,6 +266,24 @@ const daySummaryShape = z.object({
   // no counts recorded).
   hasInventoryMemo: z.boolean(),
   inventoryTotalQty: z.number(),
+  // 参加前確認のチケット形式 (event_prep.ticket_type): one of
+  // "paper_arrived" / "paper_pending" / "electronic" / "none", or
+  // null when no ticket format is set for the date. The ledger row
+  // shows it as a badge only while the date is today or later.
+  ticketType: z.string().nullable(),
+  // 参加前確認のチェック状況 (event_prep): the four departure checks
+  // (pop = POP/お品書き, announce = 参加告知, ticket = チケットOK,
+  // packing = 荷造りOK), or null when the date has no prep record
+  // at all. The ledger row shows them as one compact badge only
+  // while the date is today or later.
+  prepChecks: z
+    .object({
+      pop: z.boolean(),
+      announce: z.boolean(),
+      ticket: z.boolean(),
+      packing: z.boolean(),
+    })
+    .nullable(),
 });
 
 type DaySummary = z.infer<typeof daySummaryShape>;
@@ -303,6 +321,11 @@ async function loadDaySummaries(ctx: Ctx): Promise<DaySummary[]> {
   // its event registration was deleted) — the day still shows.
   const memoRows = await db.select().from(schema.inventoryMemos);
   const memoDates = new Set(memoRows.map((m) => m.date));
+  // 参加前確認 (event_prep): only the ticket format rides along on
+  // the day summary (for the ledger row's badge); prep dates join
+  // the ledger union like memo dates so a prep is never orphaned.
+  const prepRows = await db.select().from(schema.eventPrep);
+  const prepByDate = new Map(prepRows.map((p) => [p.date, p]));
   const itemRows = await db.select().from(schema.inventoryItems);
   const inventoryTotalByDate = new Map<string, number>();
   for (const r of itemRows) {
@@ -318,7 +341,12 @@ async function loadDaySummaries(ctx: Ctx): Promise<DaySummary[]> {
   // 登録日・県別の参加回数 all count it.
   const aggByDate = new Map((aggs as DayAgg[]).map((a) => [a.date, a]));
   const dates = [
-    ...new Set([...aggByDate.keys(), ...byDate.keys(), ...memoDates]),
+    ...new Set([
+      ...aggByDate.keys(),
+      ...byDate.keys(),
+      ...memoDates,
+      ...prepByDate.keys(),
+    ]),
   ].sort((a, b) => b.localeCompare(a));
   return dates.map((date) => {
     const a = aggByDate.get(date);
@@ -340,6 +368,17 @@ async function loadDaySummaries(ctx: Ctx): Promise<DaySummary[]> {
       salesUnreliable: f ? f.salesUnreliable !== 0 : false,
       hasInventoryMemo: memoDates.has(date),
       inventoryTotalQty: inventoryTotalByDate.get(date) ?? 0,
+      ticketType: prepByDate.get(date)?.ticketType || null,
+      prepChecks: (() => {
+        const p = prepByDate.get(date);
+        if (!p) return null;
+        return {
+          pop: p.checkPop !== 0,
+          announce: p.checkAnnounce !== 0,
+          ticket: p.checkTicket !== 0,
+          packing: p.checkPacking !== 0,
+        };
+      })(),
     };
   });
 }
@@ -397,6 +436,57 @@ async function loadInventoryMemo(
     memo: m.memo,
     items,
     totalQty: items.reduce((s, r) => s + r.qty, 0),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 参加前確認 (event_prep): per date — the departure checks （POP/
+// お品書き・参加告知・チケットOK・荷造りOK), the event's opening
+// hours, the circle's space number, the prep-side venue override,
+// the ticket format, and one guide URL (with a by-email flag).
+// User data on par with the inventory memos; never part of the
+// standard event master list. A row exists only while it has
+// content (saveEventPrep deletes an all-empty payload).
+// ---------------------------------------------------------------------------
+
+const prepShape = z.object({
+  checkPop: z.boolean(),
+  checkAnnounce: z.boolean(),
+  checkTicket: z.boolean(),
+  checkPacking: z.boolean(),
+  entryTime: z.string(),
+  startTime: z.string(),
+  endTime: z.string(),
+  space: z.string(),
+  venue: z.string(),
+  ticketType: z.string(),
+  guideUrl: z.string(),
+  guideByMail: z.boolean(),
+});
+
+type EventPrep = z.infer<typeof prepShape>;
+
+async function loadEventPrep(ctx: Ctx, date: string): Promise<EventPrep | null> {
+  const db = ctx.db<typeof schema>();
+  const rows = await db
+    .select()
+    .from(schema.eventPrep)
+    .where(eq(schema.eventPrep.date, date));
+  const p = rows[0];
+  if (!p) return null;
+  return {
+    checkPop: p.checkPop !== 0,
+    checkAnnounce: p.checkAnnounce !== 0,
+    checkTicket: p.checkTicket !== 0,
+    checkPacking: p.checkPacking !== 0,
+    entryTime: p.entryTime,
+    startTime: p.startTime,
+    endTime: p.endTime,
+    space: p.space,
+    venue: p.venue,
+    ticketType: p.ticketType,
+    guideUrl: p.guideUrl,
+    guideByMail: p.guideByMail !== 0,
   };
 }
 
@@ -1851,6 +1941,9 @@ export const Actions = {
       // イベントメモ for this date (URL / per-product sent counts / free
       // memo), or null when none is saved.
       inventoryMemo: inventoryMemoShape.nullable(),
+      // 参加前確認 for this date (departure checks / hours / space /
+      // ticket format / guide URL), or null when nothing is recorded.
+      prep: prepShape.nullable(),
     }),
     handler: async (ctx, args) => {
       const db = ctx.db<typeof schema>();
@@ -1918,7 +2011,115 @@ export const Actions = {
           : null,
         flags: await loadFlags(ctx, args.date),
         inventoryMemo: await loadInventoryMemo(ctx, args.date),
+        prep: await loadEventPrep(ctx, args.date),
       };
+    },
+  }),
+
+  saveEventPrep: defineAction({
+    description:
+      "Creates or updates the 参加前確認 (pre-event checklist) for one date: four departure checks (POP/お品書き, 参加告知, チケットOK, 荷造りOK), the entry start time (入場開始時間, HH:MM, optional), the event's start/end times (HH:MM, either may be empty), the circle's space number (free text), a prep-side venue override (the event registration's own venue is never changed; empty means the registration's venue is shown), the ticket format (paper_arrived / paper_pending / electronic / none, or \"\" for unset), one guide URL (empty or http/https only), and a flag for the guide having arrived by email. When every field is empty the record is deleted instead, so a stored prep always has content. Works on any date — in particular a future event date with an event registration but no sales. This is per-date user data only; the standard event master list is never touched.",
+    request: z.object({
+      date: dateStr,
+      checkPop: z.boolean(),
+      checkAnnounce: z.boolean(),
+      checkTicket: z.boolean(),
+      checkPacking: z.boolean(),
+      entryTime: z
+        .string()
+        .max(5)
+        .regex(/^([01]\d|2[0-3]):[0-5]\d$/, "時刻は HH:MM の形で入力してください")
+        .or(z.literal("")),
+      startTime: z
+        .string()
+        .max(5)
+        .regex(/^([01]\d|2[0-3]):[0-5]\d$/, "時刻は HH:MM の形で入力してください")
+        .or(z.literal("")),
+      endTime: z
+        .string()
+        .max(5)
+        .regex(/^([01]\d|2[0-3]):[0-5]\d$/, "時刻は HH:MM の形で入力してください")
+        .or(z.literal("")),
+      space: z.string().max(50),
+      venue: z.string().max(200),
+      ticketType: z.enum(["", "paper_arrived", "paper_pending", "electronic", "none"]),
+      guideUrl: z.string().max(2000),
+      guideByMail: z.boolean(),
+    }),
+    response: okResponse,
+    handler: async (ctx, args): Promise<z.infer<typeof okResponse>> => {
+      const db = ctx.db<typeof schema>();
+      const guideUrl = args.guideUrl.trim();
+      if (guideUrl !== "") {
+        let parsed: URL | null = null;
+        try {
+          parsed = new URL(guideUrl);
+        } catch {
+          parsed = null;
+        }
+        if (!parsed || (parsed.protocol !== "http:" && parsed.protocol !== "https:")) {
+          throw new Error("URLは http:// または https:// で始まる形で入力してください");
+        }
+      }
+      const space = args.space.trim();
+      const venue = args.venue.trim();
+      const empty =
+        !args.checkPop &&
+        !args.checkAnnounce &&
+        !args.checkTicket &&
+        !args.checkPacking &&
+        args.entryTime === "" &&
+        args.startTime === "" &&
+        args.endTime === "" &&
+        space === "" &&
+        venue === "" &&
+        args.ticketType === "" &&
+        guideUrl === "" &&
+        !args.guideByMail;
+      if (empty) {
+        await db
+          .delete(schema.eventPrep)
+          .where(eq(schema.eventPrep.date, args.date));
+        ctx.invalidateQueries();
+        return { ok: true as const };
+      }
+      const row = {
+        date: args.date,
+        checkPop: args.checkPop ? 1 : 0,
+        checkAnnounce: args.checkAnnounce ? 1 : 0,
+        checkTicket: args.checkTicket ? 1 : 0,
+        checkPacking: args.checkPacking ? 1 : 0,
+        entryTime: args.entryTime,
+        startTime: args.startTime,
+        endTime: args.endTime,
+        space,
+        venue,
+        ticketType: args.ticketType,
+        guideUrl,
+        guideByMail: args.guideByMail ? 1 : 0,
+      };
+      await db
+        .insert(schema.eventPrep)
+        .values(row)
+        .onConflictDoUpdate({
+          target: schema.eventPrep.date,
+          set: {
+            checkPop: row.checkPop,
+            checkAnnounce: row.checkAnnounce,
+            checkTicket: row.checkTicket,
+            checkPacking: row.checkPacking,
+            entryTime: row.entryTime,
+            startTime: row.startTime,
+            endTime: row.endTime,
+            space: row.space,
+            venue: row.venue,
+            ticketType: row.ticketType,
+            guideUrl: row.guideUrl,
+            guideByMail: row.guideByMail,
+          },
+        });
+      ctx.invalidateQueries();
+      return { ok: true as const };
     },
   }),
 
@@ -2265,7 +2466,7 @@ export const Actions = {
 
   deleteSalesDay: defineAction({
     description:
-      "Deletes one sales day entirely: all of its sales rows, plus its event registration, per-date flags, and inventory memo, so the date disappears from the ledger. Used to remove stray ¥0 days left over from Square exports.",
+      "Deletes one sales day entirely: all of its sales rows, plus its event registration, per-date flags, inventory memo, and 参加前確認 (event_prep), so the date disappears from the ledger. Used to remove stray ¥0 days left over from Square exports.",
     request: z.object({ date: dateStr }),
     response: okResponse,
     handler: async (ctx, args): Promise<z.infer<typeof okResponse>> => {
@@ -2280,6 +2481,9 @@ export const Actions = {
         db
           .delete(schema.inventoryMemos)
           .where(eq(schema.inventoryMemos.date, args.date)),
+        db
+          .delete(schema.eventPrep)
+          .where(eq(schema.eventPrep.date, args.date)),
       ]);
       ctx.invalidateQueries();
       return { ok: true as const };
@@ -2688,7 +2892,7 @@ export const Actions = {
 
   resetAllData: defineAction({
     description:
-      "Deletes ALL user-entered data and returns the ledger to its initial state: sales, event registrations, per-date flags, product release info (release dates / 廃盤 / product-level reference flags — this table also holds hand-registered products and their categories, so sales-less registrations are wiped too), product aliases, product merge history, and inventory memos (headers + items). The standard event master list (master_events, reference-only candidates) and the event-type definitions are NOT user-entered records and are kept. Requires confirm: true — the client gates this behind a two-step confirmation dialog.",
+      "Deletes ALL user-entered data and returns the ledger to its initial state: sales, event registrations, per-date flags, product release info (release dates / 廃盤 / product-level reference flags — this table also holds hand-registered products and their categories, so sales-less registrations are wiped too), product aliases, product merge history, inventory memos (headers + items), and 参加前確認 (event_prep). The standard event master list (master_events, reference-only candidates) and the event-type definitions are NOT user-entered records and are kept. Requires confirm: true — the client gates this behind a two-step confirmation dialog.",
     request: z.object({ confirm: z.literal(true) }),
     response: z.object({
       sales: z.number(),
@@ -2720,6 +2924,7 @@ export const Actions = {
         db.delete(schema.productMerges),
         db.delete(schema.inventoryItems),
         db.delete(schema.inventoryMemos),
+        db.delete(schema.eventPrep),
       ]);
       ctx.invalidateQueries();
       return counts;
